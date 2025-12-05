@@ -1,0 +1,18 @@
+{
+    "project_dir": "/path/to/your/bulk_seq_data/epi", 
+    "reference_file": "/path/to/reference.fa",
+    "minimal_overlap": 36,
+    "max_mismatches": 0,
+    "max_soft_5_end": 78,
+    "max_soft_3_end": 0,
+    "use_minimap2": false,
+    "filter_secondary_alignments": true,
+    "remove_tmp_dir": true,
+    "threads": 8,
+    "bwa_index_algo": "is",
+    "epitope_barcode": true,
+    "max_insertion": 0,
+    "max_deletion": 0,
+    "min_quality_3_end": 31,
+    "minimap2_kmer_length": 19
+}

@@ -1,0 +1,12 @@
+{
+  "include_leader": false,
+  "include_constant": false,
+  "mouse_or_human": "human",
+  "constant_beta": null,
+  "constant_alpha": null,
+  "exclude_c_fw": false,
+  "dataframe": null,
+  "dataset_file_path": "data/tcr_reconstruction_example_dataset.csv",
+  "output_file_path": "results/tcr_reconstruction_simple_output.csv",
+  "verbose": false
+}

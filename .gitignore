@@ -1,0 +1,75 @@
+# Ignore Python bytecode files
+__pycache__/
+*.pyc
+*.pyo
+
+# Ignore virtual environment directories
+venv/
+env/
+.venv/
+env.bak/
+venv.bak/
+
+# Ignore IDE and text editor directories and files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-workspace
+*.sublime-project
+
+# Ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Ignore system files
+.DS_Store         # macOS
+Thumbs.db          # Windows
+Desktop.ini        # Windows
+
+# Ignore log files
+*.log
+
+# Ignore coverage files
+.coverage
+*.coveragerc
+
+# Ignore pytest cache
+.pytest_cache/
+
+# Ignore distribution and packaging files
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+sdist/
+var/
+*.bak
+*.swp
+
+# Ignore temporary files created by editors
+*~
+*.tmp
+*.bak
+*.orig
+
+# Ignore configuration files that might contain sensitive information
+*.env
+*.env.*
+.envrc
+
+*.DS_Store
+.DS_store
+*.pyc
+launch.json
+*.csv
+*.pkl
+*.zip
+*.txt
+*.egg-info
+*.env
+.env
+.vscode/
+/tcr_toolbox_data
+/test_cai

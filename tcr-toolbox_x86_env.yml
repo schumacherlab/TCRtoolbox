@@ -1,0 +1,28 @@
+name: py312-tcr-toolbox
+channels:
+  - conda-forge
+  - bioconda
+  - r
+  - defaults
+dependencies:
+  - python=3.12
+  - pandas
+  - matplotlib
+  - jupyterlab
+  - openpyxl
+  - scipy
+  - pysam
+  - bwa
+  - umi_tools
+  - cutadapt
+  - samtools
+  - plotly
+  - jupyter
+  - pytest
+  - logomaker
+  - pydna=5.2.0
+  - adjusttext
+  - pip
+  - biopython=1.84
+  - pip:
+      - python-dotenv==1.1.0

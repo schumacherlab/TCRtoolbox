@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=64.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tcr_toolbox"
+version = "0.1.0"
+description = "TCR analysis tools"
+requires-python = ">=3.12"
+readme = "README.md"
+authors = [{ name = "Bjørn Kwee", email = "b.kwee@nki.nl" },
+           { name = "Marius Messemaker", email = "m.messemaker@nki.nl" }]
+license = { text = "MIT" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+]
+
+# No dependencies
+# dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tcr_toolbox*"]
+
+[project.urls]
+Homepage = "https://github.com/schumacherlab/TCRtoolbox"
+Repository = "https://github.com/schumacherlab/TCRtoolbox.git"
+
+[project.scripts]
+tcr_toolbox = "tcr_toolbox.cli:main"
