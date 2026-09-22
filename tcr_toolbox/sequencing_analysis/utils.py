@@ -8,9 +8,10 @@ from collections import defaultdict
 def remove_dna_barcode_from_string(string: str, barcode_length: int) -> str:
     string = re.sub(rf"[ACGT]{{{barcode_length}}}", "", string)  # Remove ACGT barcode
     string = re.sub(r"_\d+_\d+$", "", string)  # Remove trailing "_num_num"
-    string = string.replace("-", "_")  # Replace hyphens with underscores
+    string = string.replace("-", "_")  # Replace hyphens with underscores so that only TCR and Epi are separated by "-"
     string = re.sub(r"^_+", "", string)  # Remove leading underscores
     string = re.sub(r"_+$", "", string)  # Remove trailing underscores
+    string = re.sub(r"(?<=[ABC]\d{4})_\d+$", "", string)  # Remove technical duplicate suffix behind HLA code (e.g., A0201) if it exists
     string = string.replace("__", "_")  # Collapse 2x underscores to 1x underscore
     return string
 
@@ -82,25 +83,25 @@ def overlap_between_ref_and_count_names(
     >>>     print(count_file)
     >>>     overlap_between_ref_and_count_names(count_file = count_file,
     ...                                         count_file_ref_name_col = 'reference_name',
-    ...                                         reference_file = '/Users/[USER]/surfdrive/Shared/mm8_TCR_minigene_plate_based_seq/references/T200_Ag200/T100_beta.fa',
+    ...                                         reference_file = '/path/to/project/references/beta.fa',
     ...                                         print_diff_names = True
     ...                                         )
     >>>     print('\n')
-    /Users/[USER]/surfdrive/Shared/mm8_TCR_minigene_plate_based_seq/data/T100_vs_Ag100_Run-4_01_02_2024_bulk/TCR/counts/7627_13_T100-bulk_TTACAGGA-GCTTGTCA_S13_R1_001_trimmed_sorted_2ndfiltered_cigarmd_filtered_counts.csv
+    /path/to/project/data/run1/TCR/counts/sample1_S13_R1_001_counts.csv
     # intersecting: 92
     # diff: 1
     # union: 93
     Diff: {'102_198'}
 
-    /Users/[USER]/surfdrive/Shared/mm8_TCR_minigene_plate_based_seq/data/T100_vs_Ag100_Run-4_01_02_2024_bulk/TCR/counts/7627_14_T100-sorted-bulk_GGCATTCT-CAAGCTAG_S14_R1_001_trimmed_sorted_2ndfiltered_cigarmd_filtered_counts.csv
+    /path/to/project/data/run1/TCR/counts/sample2_S14_R1_001_counts.csv
     # intersecting: 92
     # diff: 1
     # union: 93
     Diff: {'102_198'}
 
-    >>> overlap_between_ref_and_count_names(count_file = counts_dir / '7627_8_4-1-bulk-luna_TAATACAG-GTGAATAT_S8_R1_001_counts.tsv',
+    >>> overlap_between_ref_and_count_names(count_file = counts_dir / 'sample3_S8_R1_001_counts.tsv',
     ...                                     count_file_ref_name_col = 'gene',
-    ...                                     reference_file = '/Users/[USER]/surfdrive/Shared/mm8_TCR_minigene_plate_based_seq/references/T200_Ag200/T100_beta_plate.fa',
+    ...                                     reference_file = '/path/to/project/references/beta_plate.fa',
     ...                                     print_diff_names = True
     ...                                     )
     # intersecting: 291
@@ -124,9 +125,13 @@ def overlap_between_ref_and_count_names(
         raise Exception("There are duplicate reference name in the count file!")
     count_names_set = set(count_df[count_file_ref_name_col])
 
-    print("# intersecting:", len(ref_names_set.intersection(count_names_set)))
+    intersecting = ref_names_set.intersection(count_names_set)
+    print("# intersecting:", len(intersecting))
     print("# diff:", len(ref_names_set.difference(count_names_set)))
     print("# union:", len(ref_names_set.union(count_names_set)))
+
+    sensitivity = len(intersecting) / len(ref_names_set) * 100
+    print(f"Sensitivity: {sensitivity:.2f}% ({len(intersecting)}/{len(ref_names_set)} reference names found in counts)")
 
     if print_diff_names:
         print("refs not in count names:", ref_names_set.difference(count_names_set))
@@ -137,6 +142,7 @@ def read_gdna_counts_csv(
     count_file: str | os.PathLike,
     count_file_ref_name_col: str,
     collapse_epitope_barcode: bool = False,
+    collapse_custom_ref_names_dict: dict = None,
     collapse_tcr_technical_duplicates: bool = False,
     reference_file=None,
     epitope_barcode_length: int = 18,
@@ -163,28 +169,30 @@ def read_gdna_counts_csv(
     """
     # Only python engine allows regex separators:
     count_df = pd.read_csv(count_file, sep=r"\t|,", engine="python")
+    count_df["reference_name_working"] = count_df[count_file_ref_name_col]
 
     if collapse_epitope_barcode:
-        count_df["reference_name_collapsed"] = count_df[count_file_ref_name_col].apply(lambda transcript: remove_dna_barcode_from_string(transcript, epitope_barcode_length))
-        count_df = count_df.groupby("reference_name_collapsed").sum().copy()
-        count_df.drop(count_file_ref_name_col, axis=1, inplace=True)
-        # count_df.set_index('reference_name_collapsed', drop = True, inplace = True)
-        count_df.index.name = "reference_name"
-    elif collapse_tcr_technical_duplicates:
-        duplicate_tcr_collapse_dict = collapse_duplicate_tcr_names_reference_file(reference_file=reference_file)
-        first_key = next(iter(duplicate_tcr_collapse_dict))
-        if first_key.startswith("tcr_"):
-            duplicate_tcr_collapse_dict = {k.removeprefix("tcr_"): v.removeprefix("tcr_") for k, v in duplicate_tcr_collapse_dict.items()}
-        count_df["reference_name_collapsed"] = count_df[count_file_ref_name_col].map(duplicate_tcr_collapse_dict)
-        if count_df["reference_name_collapsed"].isna().any():
-            return count_df, duplicate_tcr_collapse_dict
-            raise Exception("Some tcr names do not have dict keys in duplicate_tcr_collapse_dict")
+        count_df["reference_name_working"] = count_df["reference_name_working"].apply(lambda x: remove_dna_barcode_from_string(x, epitope_barcode_length))
 
-        count_df = count_df.groupby("reference_name_collapsed", dropna=False).sum().copy()
-        count_df.drop(count_file_ref_name_col, axis=1, inplace=True)
-        count_df.index.name = "reference_name"
-    else:
-        count_df.set_index(count_file_ref_name_col, drop=True, inplace=True)
-        count_df.index.name = "reference_name"
+    if collapse_tcr_technical_duplicates:
+        duplicate_tcr_collapse_dict = collapse_duplicate_tcr_names_reference_file(reference_file=reference_file)
+
+        if duplicate_tcr_collapse_dict:
+            first_key = next(iter(duplicate_tcr_collapse_dict))
+            if first_key.startswith("tcr_"):
+                duplicate_tcr_collapse_dict = {k.removeprefix("tcr_"): v.removeprefix("tcr_") for k, v in duplicate_tcr_collapse_dict.items()}
+
+            count_df["reference_name_working"] = count_df["reference_name_working"].map(duplicate_tcr_collapse_dict)
+
+            if count_df["reference_name_working"].isna().any():
+                missing = count_df.loc[count_df["reference_name_working"].isna(), count_file_ref_name_col].unique()
+                raise Exception(f"Missing TCR names in collapse map: {missing}")
+
+    if collapse_custom_ref_names_dict is not None:
+        count_df["reference_name_working"] = count_df["reference_name_working"].replace(collapse_custom_ref_names_dict)
+
+    count_df = count_df.groupby("reference_name_working", dropna=False).sum()
+    count_df.index.name = "reference_name"
+    count_df.drop(columns=[count_file_ref_name_col], inplace=True, errors="ignore")
 
     return count_df

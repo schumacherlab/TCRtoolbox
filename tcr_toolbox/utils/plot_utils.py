@@ -1,9 +1,8 @@
 # plotting helper functions
 import itertools
 import os
-from typing import Union
-
-import os
+import re
+from pathlib import Path
 from typing import Union
 
 import matplotlib as mpl
@@ -11,6 +10,8 @@ import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.colors import BoundaryNorm, ListedColormap
+from matplotlib.patches import Patch
 from numpy.typing import ArrayLike
 from scipy.interpolate import interpn
 
@@ -104,6 +105,7 @@ def set_mpl_params(mpl):
     mpl.rcParams["grid.color"] = "0.8"
     mpl.rcParams["grid.linestyle"] = "solid"
     mpl.rcParams["legend.frameon"] = False
+    mpl.rcParams["font.family"] = "Arial"  # added
     mpl.rcParams["figure.dpi"] = 300
     mpl.rc("savefig", dpi=300)
     mpl.rcParams["pdf.fonttype"] = 42
@@ -286,92 +288,78 @@ def plot_count_histogram(
     bin_size: int,
     xlabel: str,
     title: str,
-    xlim_max: int,
     ylim_max: int,
+    log10: bool = False,
+    min_count_for_95th_5th_ratio: float = None,
     save_file_path: Union[str, os.PathLike[str]] = None,
     w: float = 6.25,
     h: float = 6.25,
 ):
-    """Write a histogram from a count csv/tsv file.
+    """Plot a histogram of per-reference counts from `count_file`, and print a 95th/5th percentile ratio as a library-uniformity QC metric.
 
     Parameters
     ----------
-    count_file : Union[str, os.PathLike[str]]
-        String path to count file.
-    count_file_ref_name_col : str
-        Column that contains reference names in the count file.
-    count_file_count_col : str
-        Column that contains the count per reference name in the count file.
-    bin_min : int
-        Left edge of the count range to binned.
-    bin_max : int
-        Right edge of the count range to binned.
-    bin_size : int
-        Bin size.
-    xlabel : str
-        xlabel of the histogram.
-    title : str
-        Title of the histogram.
-    save_file_path : Union[str, os.PathLike[str]]
-        File name string path.
-    xlim_max : int
-        Set the maximal x-axis view limits.
-    ylim_max : int
-        Set the maximal y-axis view limits.
-    w : float = 6.25
-        Width of the figure.
-    h : float = 6.25
-        Height of the figure.
-
-    Examples
-    --------
-    >>> path = '/Users/[USER]/surfdrive/Shared/mm8_TCR_minigene_plate_based_seq/data/T100_vs_Ag100_Run-4_01_02_2024_bulk/Ag'
-    >>> for count_file in glob.glob(path + '/counts/*.csv'):
-    >>>     print(count_file)
-    >>>     plot_count_histogram(count_file = count_file,
-    ...                          count_file_ref_name_col = 'reference_name',
-    ...                          count_file_count_col = 'read_count',
-    ...                          bin_min = 0,
-    ...                          bin_max = 22_000,
-    ...                          bin_size = 1000,
-    ...                          xlabel = '# reads per transcript',
-    ...                          title = os.path.basename(count_file).split('_')[-11],
-    ...                          save_file_path = path + '/outputs/' + os.path.basename(count_file).split('_')[-11] + '_count_hist.pdf',
-    ...                          xlim_max = 22_000,
-    ...                          ylim_max = 45,
-    ...                          w = 6.25,
-    ...                          h = 6.25
-    ...                         )
+    min_count_for_95th_5th_ratio : float, optional
+        Only counts above this threshold are included when computing the 95th/5th percentile
+        ratio that gets printed (and drawn as an orange vertical line). This threshold is compared
+        directly against the plotted series, so if `log10=True` it must be given in log10 space
+        (e.g. `3` means "raw count > 1000"), not in raw counts.
+    log10 : bool, default False
+        If True, plot and filter on log10(count) instead of the raw count.
     """
     # Only python engine allows regex separators:
-    count_df = pd.read_csv(count_file, sep=r"\t|,", engine="python", usecols=[count_file_ref_name_col, count_file_count_col])
+    count_df = pd.read_csv(count_file, sep=r"\t|,", engine="python", usecols=[count_file_ref_name_col, count_file_count_col]).copy()
 
     if count_df[count_file_ref_name_col].duplicated().any():
         raise Exception("There are duplicate reference names in the count file!")
 
-    if bin_max < count_df[count_file_count_col].max():
-        print("Warning: bin_max is smaller than maximal value in count file:", count_df[count_file_count_col].max())
+    raw_counts_series = count_df[count_file_count_col].copy()
+    counts_series = raw_counts_series.copy()
 
-    if xlim_max < count_df[count_file_count_col].max():
-        print("Warning: xlim_max is smaller than maximal value in count file:", count_df[count_file_count_col].max())
+    if log10:
+        n_nonpositive = (raw_counts_series <= 0).sum()
+        if n_nonpositive:
+            raise Exception(f"{n_nonpositive} row(s) have count <= 0 and cannot be log10-transformed!")
+        counts_series = np.log10(raw_counts_series)
+
+    if min_count_for_95th_5th_ratio:
+        mask = counts_series > min_count_for_95th_5th_ratio
+    else:
+        mask = pd.Series(True, index=counts_series.index)
+
+    percentile_counts_series = raw_counts_series[mask]  # always raw, regardless of log10
+
+    p95 = np.percentile(percentile_counts_series, 95)
+    p5 = np.percentile(percentile_counts_series, 5)
+    ratio = p95 / p5 if p5 != 0 else np.nan
+    print(f"95th percentile: {p95:.2f} | 5th percentile: {p5:.2f} | 95th/5th ratio: {ratio:.2f}")
+
+    if bin_max < counts_series.max():
+        print("Warning: bin_max is smaller than maximal value in count file:", counts_series.max())
 
     ax, fig, gs = startfig(w, h)
-    ax.grid(zorder=-4)
-    ax.hist(count_df[count_file_count_col], bins=np.arange(bin_min, bin_max, bin_size), color="lightblue", linewidth=0.5, zorder=4)
-    ax.axvline(np.median(count_df[count_file_count_col]), color="red", linewidth=0.75, zorder=6)
-    ax.set_xlim(0, xlim_max)
+    ax.hist(counts_series, bins=np.arange(bin_min, bin_max, bin_size), color="grey", edgecolor="none", zorder=4)
+    ax.axvline(np.median(counts_series), color="red", linewidth=0.75, zorder=6)
+    if min_count_for_95th_5th_ratio:
+        ax.axvline(min_count_for_95th_5th_ratio, color="orange", linewidth=0.75, zorder=6)
+
+    ax.set_xlim(0, bin_max)
     ax.set_ylim(0, ylim_max)
     ax.set_xticks(ax.get_xticks())
     ax.set_yticks(ax.get_yticks())
-    ax.set_xticklabels([round(x) for x in ax.get_xticks()], fontsize=8, rotation=90)
-    ax.set_yticklabels([round(y) for y in ax.get_yticks()], fontsize=8)
-    ax.set_xlabel(xlabel, fontsize=8)
-    ax.set_ylabel("Frequency", fontsize=8)
-    ax.set_title(title, fontsize=8)
+    ax.set_xticklabels([round(x) for x in ax.get_xticks()], fontsize=7, rotation=90)
+    ax.set_yticklabels([round(y) for y in ax.get_yticks()], fontsize=7)
+    if log10:
+        ax.set_xlabel(f"{xlabel} (log10)", fontsize=7)
+    else:
+        ax.set_xlabel(xlabel, fontsize=7)
+    ax.set_ylabel("Frequency", fontsize=7)
+    ax.set_title(title, fontsize=7)
+    ax.tick_params(top=False, right=False)
     fig.tight_layout()
 
     if save_file_path:
-        fig.savefig(save_file_path, dpi=300)
+        fig.savefig(save_file_path)
         plt.close()
     else:
         plt.show()
@@ -400,8 +388,8 @@ def plot_10x_tcr_umi_counts_hist(
         print("Warning: bin_max is smaller than maximal UMI count alpha + beta chain sums:", combined_meta_df.loc[:, "umis_a_b_sum"].max())
 
     ax, fig, gs = startfig(11, 7)
-    ax.hist(combined_meta_df.loc[:, "umis_a"], color="black", density=True, bins=np.arange(0, bin_max, bin_size), alpha=0.3, label="UMI counts beta chain")
-    ax.hist(combined_meta_df.loc[:, "umis_b"], color="red", density=True, bins=np.arange(0, bin_max, bin_size), alpha=0.3, label="UMI counts alpha chain")
+    ax.hist(combined_meta_df.loc[:, "umis_a"], color="black", density=True, bins=np.arange(0, bin_max, bin_size), alpha=0.3, label="UMI counts alpha chain")
+    ax.hist(combined_meta_df.loc[:, "umis_b"], color="red", density=True, bins=np.arange(0, bin_max, bin_size), alpha=0.3, label="UMI counts beta chain")
 
     ax.set_ylim(0, ylim_max)
     ax.set_xlim(0, bin_max + bin_size)
@@ -500,7 +488,7 @@ def plot_frac_pair_clonotype_of_most_abundant_pair_clonotype_within_chain_clonot
     if save_prefix:
         fig.savefig(os.path.join(save_dir, save_prefix + "_fraction_pair_clonotype_of_most_abundant_pair_clonotype_within_alpha_chain_clonotype_hist.pdf"))
     else:
-        fig.savefig(os.path.join(save_dir, +"fraction_pair_clonotype_of_most_abundant_pair_clonotype_within_alpha_chain_clonotype_hist.pdf"))
+        fig.savefig(os.path.join(save_dir, "fraction_pair_clonotype_of_most_abundant_pair_clonotype_within_alpha_chain_clonotype_hist.pdf"))
     plt.close()
 
     beta_ratio_df = pd.DataFrame({"beta_ratio": beta_ratio_list, "alpha_umi_counts": alpha_umi_list})
@@ -655,14 +643,11 @@ def plot_clonotype_frequency(
                 + str(donor_df.loc[donor_df.loc[:, coreceptor_col] == CD4_str, :].shape[0]),
                 fontsize=7,
             )
-
-        if CD4_str:
+        elif CD4_str:
             ax.set_title(donor + "\nCD4 n = " + str(donor_df.loc[donor_df.loc[:, coreceptor_col] == CD4_str, :].shape[0]), fontsize=7)
-
-        if CD8_str:
+        elif CD8_str:
             ax.set_title(donor + "\nCD8 n = " + str(donor_df.loc[donor_df.loc[:, coreceptor_col] == CD8_str, :].shape[0]), fontsize=7)
-
-        if not CD4_str and not CD8_str:
+        else:
             ax.set_title(donor + "\nn = " + str(donor_df.shape[0]), fontsize=7)
 
         ax.tick_params("both", labelsize=7)
@@ -713,14 +698,11 @@ def plot_clonotype_frequency(
                 + str(donor_df.loc[donor_df.loc[:, coreceptor_col] == CD4_str, :].shape[0]),
                 fontsize=7,
             )
-
-        if CD4_str:
+        elif CD4_str:
             ax.set_title(donor + "\nCD4 n = " + str(donor_df.loc[donor_df.loc[:, coreceptor_col] == CD4_str, :].shape[0]), fontsize=7)
-
-        if CD8_str:
+        elif CD8_str:
             ax.set_title(donor + "\nCD8 n = " + str(donor_df.loc[donor_df.loc[:, coreceptor_col] == CD8_str, :].shape[0]), fontsize=7)
-
-        if not CD4_str and not CD8_str:
+        else:
             ax.set_title(donor + "\nn = " + str(donor_df.shape[0]), fontsize=7)
 
         ax.tick_params("both", labelsize=7)
@@ -732,19 +714,154 @@ def plot_clonotype_frequency(
         plt.close()
 
 
-def generate_color_dict(key_list):
+def generate_color_dict(key_list, min_luminance: float = 0.5):
+    """
+    Generate colors for a list of keys while avoiding colors too dark for black text.
+
+    Parameters
+    ----------
+    key_list : list
+        List of keys to assign colors.
+    min_luminance : float, default 0.5
+        Minimum relative luminance to keep a color. Lower values may be too dark for black text.
+    """
+
     base_colors = plt.cm.tab20.colors
 
     def adjust_color(color, factor):
         r, g, b = color
         return (min(r * factor, 1), min(g * factor, 1), min(b * factor, 1))
 
+    def luminance(color):
+        r, g, b = color
+        return 0.299 * r + 0.587 * g + 0.114 * b  # relative luminance formula
+
     factors = [1.0, 0.8, 1.2]  # normal, darker, lighter
     expanded_colors = []
+
     for factor in factors:
-        expanded_colors.extend([adjust_color(c, factor) for c in base_colors])
+        for c in base_colors:
+            new_c = adjust_color(c, factor)
+            if luminance(new_c) >= min_luminance:
+                expanded_colors.append(new_c)
+
+    max_colors = len(expanded_colors)
+    if len(key_list) > max_colors:
+        raise ValueError(f"At most {max_colors} keys supported with min_luminance={min_luminance}")
 
     color_cycle = itertools.cycle(expanded_colors)
-
     color_dict = {s: mcolors.to_hex(next(color_cycle)) for s in key_list}
+
     return color_dict
+
+
+def plot_custom_tcr_lib_pool_map(plate_df: pd.DataFrame, lib_col: str, lib_col_dict: dict, plate_name: str, well_col: str = "well", outs_dir: Path = None):
+    plate_df = plate_df.copy()
+    plate_df.dropna(subset=["cdr3j_alpha_nt_order_primers"], axis=0, inplace=True)
+
+    for lib in plate_df[lib_col].unique():
+        if lib not in lib_col_dict:
+            raise Exception(f"All libraries in {lib_col}: {plate_df[lib_col].unique()} need a color in lib_col_dict: {list(lib_col_dict.keys())}")
+
+    letter_to_number_map = dict(zip("ABCDEFGHIJKLMNOP", range(16)))
+
+    plot_plate_df = pd.DataFrame(np.nan, index=letter_to_number_map.keys(), columns=np.arange(24))
+
+    for col_idx, lib in enumerate(plate_df[lib_col].unique()):
+        lib_df = plate_df.loc[plate_df[lib_col] == lib, :]
+        for well in lib_df[well_col]:
+            row = re.split(r"\d", well)[0]
+            col = int(re.split(r"[A-P]", well)[1]) - 1
+            i = letter_to_number_map[row]
+            j = col
+
+            if not np.isnan(plot_plate_df.iloc[i, j]):
+                raise ValueError(f"Well {well} assigned twice")
+
+            plot_plate_df.iloc[i, j] = col_idx + 1
+
+    libs = list(plate_df[lib_col].unique())
+    cmap = ListedColormap([lib_col_dict[lib] for lib in libs])
+    bounds = np.arange(0.5, len(libs) + 1.5, 1)
+    norm = BoundaryNorm(bounds, cmap.N)
+
+    ax, fig, gs = startfig(w=36, h=55)
+    ax.matshow(plot_plate_df, cmap=cmap, norm=norm)
+
+    # Axis ticks
+    ax.set_xticks(np.arange(plot_plate_df.shape[1]))
+    ax.set_xticklabels([str(i + 1) for i in range(plot_plate_df.shape[1])], fontsize=8)
+    ax.set_yticks(np.arange(plot_plate_df.shape[0]))
+    ax.set_yticklabels(list(letter_to_number_map.keys()), fontsize=8)
+    ax.xaxis.set_ticks_position("top")
+    ax.yaxis.set_ticks_position("left")
+
+    # Grid lines around wells
+    ax.set_xticks(np.arange(-0.5, plot_plate_df.shape[1], 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, plot_plate_df.shape[0], 1), minor=True)
+    ax.grid(which="minor", color="black", linewidth=0.5)
+    ax.tick_params(which="minor", bottom=False, left=False)
+
+    # Add well names inside cells
+    for i, row_letter in enumerate(letter_to_number_map.keys()):
+        for j in range(plot_plate_df.shape[1]):
+            well_name = f"{row_letter}{j + 1}"
+            ax.text(j, i, well_name, ha="center", va="center", fontsize=6, color="black")
+
+    ax.set_title("Plate: " + str(plate_name), pad=25)
+
+    legend_handles = [Patch(facecolor=lib_col_dict[lib], edgecolor="black", label=lib) for lib in libs]
+
+    ax.legend(handles=legend_handles, loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=1, frameon=False, fontsize=8)
+
+    fig.tight_layout()
+
+    if outs_dir:
+        fig.savefig(os.path.join(outs_dir, f"plate_{plate_name}_library_pooling_map.pdf"))
+        plt.close()
+    else:
+        plt.show()
+
+
+# Modified from: https://stackoverflow.com/questions/36153410/how-to-create-a-swarm-plot-with-matplotlib
+def simple_beeswarm2(y, nbins=None, width=1.0):
+    """
+    Returns x coordinates for points in `y` so plotting `x` vs `y`
+    creates a deterministic, symmetric beeswarm plot.
+    Includes zero values in the first bin.
+    """
+    y = np.asarray(y)
+
+    if nbins is None:
+        nbins = int(np.ceil(len(y) / 6))
+
+    x = np.zeros(len(y))
+
+    nn, ybins = np.histogram(y, bins=nbins)
+    nmax = nn.max()
+
+    ibs = []
+    for k, (ymin, ymax) in enumerate(zip(ybins[:-1], ybins[1:])):
+        if k == 0:
+            # include lower bound for first bin
+            i = np.nonzero((y >= ymin) & (y <= ymax))[0]
+        else:
+            i = np.nonzero((y > ymin) & (y <= ymax))[0]
+        ibs.append(i)
+
+    dx = width / max(1, nmax // 2)
+
+    for i in ibs:
+        if len(i) > 1:
+            yy = y[i]
+            j = len(i) % 2
+            i = i[np.argsort(yy)]
+
+            a = i[j::2]
+            b = i[j + 1 :: 2]
+
+            offset = (0.5 + j / 3 + np.arange(len(b))) * dx
+            x[a] = -offset
+            x[b] = offset
+
+    return x

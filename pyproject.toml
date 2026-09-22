@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tcr_toolbox"
-version = "0.1.0"
+version = "2.0.0"
 description = "TCR analysis tools"
 requires-python = ">=3.12"
 readme = "README.md"
 authors = [{ name = "Bjørn Kwee", email = "b.kwee@nki.nl" },
            { name = "Marius Messemaker", email = "m.messemaker@nki.nl" }]
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 classifiers = [
     "Programming Language :: Python :: 3",
 ]

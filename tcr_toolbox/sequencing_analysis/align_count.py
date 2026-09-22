@@ -20,6 +20,8 @@ from tcr_toolbox.utils.utils import stream_stderr
 
 load_dotenv()
 tcr_toolbox_data_path = os.getenv("tcr_toolbox_data_path")
+if tcr_toolbox_data_path is None:
+    raise EnvironmentError("The 'tcr_toolbox_data_path' environment variable is not set (checked .env and the process environment).")
 
 
 def return_fastq_basename(fastq: str | os.PathLike) -> str:
@@ -88,13 +90,21 @@ def cutadapt_trim_reads(
             cmd.extend(["-q", str(min_quality_3_end)])
 
         for flag, keys in trim_adapter_config.items():
-            for key in keys:
-                if flag == "-g":
+            if flag == "-a_linked":
+                for five_prime_key, three_prime_key in keys:
+                    five_prime_seq = p20_pMX_trim_seqs[five_prime_key]
+                    three_prime_seq = p20_pMX_trim_seqs[three_prime_key]
+                    cmd.extend(["-a", f"^{five_prime_seq}...{three_prime_seq}"])
+            elif flag == "-g":
+                for key in keys:
                     cmd.extend([flag, "^" + p20_pMX_trim_seqs[key]])
-                else:
+            elif flag == "-a":
+                for key in keys:
                     cmd.extend([flag, p20_pMX_trim_seqs[key]])
+            else:
+                raise ValueError(f'Only flags "-a_linked", "-g", and "-a" are allowed, not {flag!r}')
 
-        cmd.extend(["-n", "2", "-j", str(threads)])
+        cmd.extend(["-n", "1", "-j", str(threads)])
         cmd.extend(["-o", str(trimmed_fastq), str(fastq)])
 
         subprocess.run(cmd, stdout=fout, stderr=ferr, check=True)
@@ -154,8 +164,15 @@ def align_reads(
 
     bam_file.unlink()
 
-    with open(flagstat_out_file, "w") as fout:
-        subprocess.run(["samtools", "flagstat", str(sorted_bam_file)], stdout=fout, check=True)
+    flagstat_result = subprocess.run(["samtools", "flagstat", str(sorted_bam_file)], capture_output=True, text=True, check=True)
+    flagstat_out_file.write_text(flagstat_result.stdout)
+
+    primary_mapped_match = re.search(r"(\d+) \+ \d+ primary mapped \(([\d.]+)%", flagstat_result.stdout)
+    if primary_mapped_match:
+        count, pct = primary_mapped_match.group(1), primary_mapped_match.group(2)
+        print(f"% primary aligned ({trimmed_fastq.name}): {pct}% ({count} reads)", file=sys.stderr)
+    else:
+        print(f"Warning: could not parse '% primary mapped' from flagstat output for {trimmed_fastq.name}", file=sys.stderr)
 
     print(f"Alignment {trimmed_fastq.name} completed.", file=sys.stderr)
     return bam_file, sorted_bam_file, flagstat_out_file
@@ -166,13 +183,17 @@ def samtools_filter_secondary_alignments(flagstat_out_file: str | os.PathLike, s
     sorted_bam_file = Path(sorted_bam_file).expanduser()
     logs_dir = Path(logs_dir).expanduser()
 
-    with open(flagstat_out_file, "r") as flag_in:
-        lines = flag_in.readlines()
+    flagstat_text = flagstat_out_file.read_text()
 
     log_file = logs_dir / f"{sorted_bam_file.stem}_samtools_filter_secondary.err"
 
-    if not int(lines[2].split(" +")[0]) == 0:
-        print(int(lines[2].split(" +")[0]), "secondary alignments detected!", "Removing secondary alignments!", file=sys.stderr)
+    secondary_match = re.search(r"^(\d+) \+ \d+ secondary", flagstat_text, re.MULTILINE)
+    if secondary_match is None:
+        raise ValueError(f"Could not find a 'secondary' count line in flagstat output: {flagstat_out_file}")
+    secondary_count = int(secondary_match.group(1))
+
+    if secondary_count != 0:
+        print(secondary_count, "secondary alignments detected!", "Removing secondary alignments!", file=sys.stderr)
 
         second_filtered_bam_file = sorted_bam_file.with_name(sorted_bam_file.stem + "_second_filtered")
         sorted_bam_file_index = sorted_bam_file.with_suffix(".bam.bai")
@@ -307,11 +328,7 @@ def umi_tools_count(bam_file: str | os.PathLike, counts_dir: str | os.PathLike, 
 def count_umi_cell(
     project_dir: str | os.PathLike,
     reference_file: str | os.PathLike,
-    barcode_file: str | os.PathLike = Path(tcr_toolbox_data_path)
-    / "tcr_toolbox_datasets"
-    / "pair_scan_luna_plate_seq"
-    / "barcodes"
-    / "barcodes_for_counting.tsv",
+    barcode_file: str | os.PathLike = Path(tcr_toolbox_data_path) / "tcr_toolbox_datasets" / "pair_scan_luna_plate_seq" / "barcodes" / "barcodes_for_counting.tsv",
     bc_pattern: str = "CCCCCCCCNNNNNNN",
     use_minimap2: bool = False,
     filter_secondary_alignments: bool = True,
@@ -396,7 +413,7 @@ def count_umi_cell(
 
     See Also
     --------
-    generate_assembly_nt_refs : Function in `tcr_toolbox.tcr_assembly.sequencing_analysis.reference` that can be used
+    generate_assembly_nt_refs : Function in `tcr_toolbox.sequencing_analysis.reference` that can be used
     to generate the reference FASTA file.
 
     Examples
@@ -472,7 +489,7 @@ def count_umi_cell(
     counts_dir = project_dir / "counts"
 
     for directory in [tmp_dir, logs_dir, whitelists_dir, bam_outs_dir, counts_dir]:
-        directory.mkdir(parents=True, exist_ok=True)
+        directory.mkdir(parents=True, exist_ok=False)
 
     if not use_minimap2:
         ref_tmp_dir = reference_dir / "tmp"
@@ -688,7 +705,7 @@ def count_reads_bulk(
 
     See Also
     --------
-    generate_assembly_nt_refs : Function in `tcr_toolbox.tcr_assembly.sequencing_analysis.reference` that can be used
+    generate_assembly_nt_refs : Function in `tcr_toolbox.sequencing_analysis.reference` that can be used
     to generate the reference FASTA.
 
     Examples
@@ -713,9 +730,9 @@ def count_reads_bulk(
     ...     min_quality_3_end=31
     ... )
     Indexing reference...
-    Started cutadapt trimming: 8191_33_B-YWE-2_TGGATCGA-TATCGCAC_S33_R1_001.fastq.gz
-    Applying 3' quality trimming: 31 Started bwa mem alignment: 8191_33_B-YWE-2_TGGATCGA-TATCGCAC_S33_R1_001_trimmed.fastq.gz
-    Alignment 8191_33_B-YWE-2_TGGATCGA-TATCGCAC_S33_R1_001_trimmed.fastq.gz completed.
+    Started cutadapt trimming: 8191_33_B-patient-X-2_TGGATCGA-TATCGCAC_S33_R1_001.fastq.gz
+    Applying 3' quality trimming: 31 Started bwa mem alignment: 8191_33_B-patient-X-2_TGGATCGA-TATCGCAC_S33_R1_001_trimmed.fastq.gz
+    Alignment 8191_33_B-patient-X-2_TGGATCGA-TATCGCAC_S33_R1_001_trimmed.fastq.gz completed.
     1 secondary alignments detected! Removing secondary alignments!
     Top 10 most common cigar strings: [('78S36M', 672164), ('80S36M', 39352), ('84S36M', 19364), ('77S36M', 15368), ('29S36M', 14358), ('32S36M', 14071), ('31S36M', 13947), ('79S36M', 13524), ('76S36M', 12767), ('34S36M', 12654)]
     Top 10 most common MD tags: [('36', 1337393), ('32', 9211), ('33', 5548), ('34', 5423), ('35', 5084), ('31', 4845), ('5G30', 3703), ('30', 3121), ('8C27', 2433), ('31A4', 2183)]
@@ -724,7 +741,7 @@ def count_reads_bulk(
     Top 10 most common MD tags: [('36', 1264645)]
 
     Counting bam files...
-    Counting: 8191_33_B-YWE-2_TGGATCGA-TATCGCAC_S33_R1_001_trimmed_sorted_cigarmd_filtered.bam
+    Counting: 8191_33_B-patient-X-2_TGGATCGA-TATCGCAC_S33_R1_001_trimmed_sorted_second_filtered_cigarmd_filtered.bam
     gdna reads counting done!
 
 
@@ -748,10 +765,10 @@ def count_reads_bulk(
     ...     min_quality_3_end=31
     ... )
     Indexing reference...
-    Started cutadapt trimming: 8191_37_T-YWE-2_GATTCTGC-CTCTCGTC_S37_R1_001.fastq.gz
+    Started cutadapt trimming: 8191_37_T-patient-X-2_GATTCTGC-CTCTCGTC_S37_R1_001.fastq.gz
     Applying 3' quality trimming: 31
-    Started bwa mem alignment: 8191_37_T-YWE-2_GATTCTGC-CTCTCGTC_S37_R1_001_trimmed.fastq.gz
-    Alignment 8191_37_T-YWE-2_GATTCTGC-CTCTCGTC_S37_R1_001_trimmed.fastq.gz completed.
+    Started bwa mem alignment: 8191_37_T-patient-X-2_GATTCTGC-CTCTCGTC_S37_R1_001_trimmed.fastq.gz
+    Alignment 8191_37_T-patient-X-2_GATTCTGC-CTCTCGTC_S37_R1_001_trimmed.fastq.gz completed.
     5731 secondary alignments detected! Removing secondary alignments!
     Top 10 most common cigar strings: [('2S110M', 106142), ('3S110M', 48031), ('108M', 14896), ('1S110M', 14352), ('110M', 11741), ('109M', 9654), ('105M', 7900), ('107M', 7801), ('106M', 6523), ('63M', 5667)]
     Top 10 most common MD tags: [('110', 153853), ('108', 13381), ('109', 8991), ('107', 7781), ('105', 7614), ('106', 6559), ('63', 5551), ('72', 4982), ('69', 4904), ('66', 4790)]
@@ -760,7 +777,7 @@ def count_reads_bulk(
     Top 10 most common MD tags: [('110', 150574)]
 
     Counting bam files...
-    Counting: 8191_37_T-YWE-2_GATTCTGC-CTCTCGTC_S37_R1_001_trimmed_sorted_second_filtered_cigarmd_filtered.bam
+    Counting: 8191_37_T-patient-X-2_GATTCTGC-CTCTCGTC_S37_R1_001_trimmed_sorted_second_filtered_cigarmd_filtered.bam
     gdna reads counting done!
     """
     project_dir = Path(project_dir).expanduser()
@@ -786,7 +803,7 @@ def count_reads_bulk(
     counts_dir = project_dir / "counts"
 
     for directory in [tmp_dir, logs_dir, bam_outs_dir, counts_dir]:
-        directory.mkdir(parents=True, exist_ok=True)
+        directory.mkdir(parents=True, exist_ok=False)
 
     if not use_minimap2:
         ref_tmp_dir = reference_dir / "tmp"

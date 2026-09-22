@@ -6,7 +6,7 @@ import math
 import os
 import re
 from re import search
-from typing import Literal, Union
+from typing import Literal, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -32,13 +32,14 @@ from tcr_toolbox.utils.codon_optimizer import codon_optimize, make_search_string
 from tcr_toolbox.utils.constants import aa_to_all_codons_list
 from tcr_toolbox.utils.logger import log_function_to_file
 from tcr_toolbox.utils.utils import (
+    add_well_coordinates,
+    add_wells_plate_layout,
     generate_random_dna_sequence,
     levenshtein_distance,
     levenshtein_ratio,
     write_echo_dispense_csv,
     write_hamilton_pipetting_excel_sheet,
     write_idot_dispense_csv,
-    add_well_coordinates,
 )
 import warnings
 from Bio import BiopythonDeprecationWarning
@@ -146,11 +147,10 @@ def init_oligo_order_run_dir(run_name: str):
             - `v_gene_stock/`
         - `pydna_logs`
         - `pydna_ligation_dicts`
+        - `library_pooling_plate_maps`
     """
     if not tcr_toolbox_data_path:
-        raise EnvironmentError(
-            "Environment variable 'tcr_toolbox_data_path' is not set. Did you create or edit your .env file with the correct path?"
-        )
+        raise EnvironmentError("Environment variable 'tcr_toolbox_data_path' is not set. Did you create or edit your .env file with the correct path?")
 
     run_dirs_path = os.path.join(tcr_toolbox_data_path, "tcr_toolbox_tcr_assembly_runs")
 
@@ -176,13 +176,14 @@ def init_oligo_order_run_dir(run_name: str):
     os.mkdir(os.path.join(run_path, "v_genes_premix_dispense", "v_gene_stock"))  # will be removed after running pydna simulation
     os.mkdir(os.path.join(run_path, "pydna_logs"))
     os.mkdir(os.path.join(run_path, "pydna_ligation_dicts"))
+    os.mkdir(os.path.join(run_path, "library_pooling_plate_maps"))
 
     return numbered_run_name, run_path
 
 
 def validate_oligo_order_run_dir(run_path: str | os.PathLike):
     """Check that a run_path is a valid standardized oligo_order run directory."""
-    required_subdirs = ["cdr3j_oligo_order_sheets", "plate_sheets", "pydna_ligation_dicts", "pydna_logs"]
+    required_subdirs = ["cdr3j_oligo_order_sheets", "plate_sheets", "pydna_ligation_dicts", "pydna_logs", "library_pooling_plate_maps"]
 
     if not os.path.isdir(run_path):
         raise FileNotFoundError(
@@ -366,13 +367,7 @@ def add_collapsed_v_alleles_to_01_col(tcr_df: pd.DataFrame, v_alpha_col: str, v_
 
 
 def list_v_alpha_and_v_beta_dna_files_dir(
-    v_gene_dir: Union[str, os.PathLike[str]] = os.path.join(
-        tcr_toolbox_data_path,
-        "tcr_toolbox_datasets",
-        "tcr_assembly",
-        "plasmids",
-        "TRV_plasmid_stocks_ordered_at_Twist",
-    ),
+    v_gene_dir: Union[str, os.PathLike[str]] = os.path.join(tcr_toolbox_data_path, "tcr_toolbox_datasets", "tcr_assembly", "plasmids", "TRV_plasmid_stocks_ordered_at_Twist"),
 ):
     v_alphas_list = [os.path.basename(v_gene_file).split(".dna")[0] for v_gene_file in glob.glob(v_gene_dir + "/TRAV*.dna")]
     v_betas_list = [os.path.basename(v_gene_file).split(".dna")[0] for v_gene_file in glob.glob(v_gene_dir + "/TRBV*.dna")]
@@ -427,13 +422,7 @@ def filter_tcr_df_on_v_genes_in_stock(
     """
 
     v_alphas_list, v_betas_list = list_v_alpha_and_v_beta_dna_files_dir(
-        v_gene_dir=os.path.join(
-            tcr_toolbox_data_path,
-            "tcr_toolbox_datasets",
-            "tcr_assembly",
-            "plasmids",
-            "TRV_plasmid_stocks_ordered_at_Twist",
-        )
+        v_gene_dir=os.path.join(tcr_toolbox_data_path, "tcr_toolbox_datasets", "tcr_assembly", "plasmids", "TRV_plasmid_stocks_ordered_at_Twist")
     )
 
     tcr_df[v_alpha_col] = tcr_df[v_alpha_col].str.replace("/", "_").str.strip()
@@ -883,7 +872,22 @@ def assign_tcrs_to_wells_from_layout(df_plate: pd.DataFrame, tcr_assignment_plat
     return df_merged
 
 
-def add_standardized_tcr_assembly_well_plate_layout(run_tcr_df: pd.DataFrame, grouping_col: str, well_plate_size: int = 384):
+def _build_fixed_well_plate(df_with_well: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build a full 384-well plate DataFrame from TCRs that already carry a `well`
+    column (e.g. 'A3', 'P24'). Wells not occupied by a TCR become NaN rows.
+    Output format matches assign_tcrs_to_wells_from_layout (includes `tcr_idx`).
+    """
+    all_wells = pd.DataFrame({"tcr_idx": range(384)})
+    all_wells = add_wells_plate_layout(all_wells, well_384_or_96=384)
+    all_wells = all_wells.drop(columns=["row", "column"])
+    merged = all_wells.merge(df_with_well, on="well", how="left")
+    return merged.reset_index(drop=True)
+
+
+def add_standardized_tcr_assembly_well_plate_layout(
+    run_tcr_df: pd.DataFrame, grouping_col: str, library_col: str, well_plate_size: int = 384, fixed_well_assignment_map_path: Optional[str] = None
+):
     """
     Assign TCRs to 384-well plates by group. TCRs from different groups never share the same plate.
     Raises an error if the last plate of a group would be less than half-filled.
@@ -893,70 +897,130 @@ def add_standardized_tcr_assembly_well_plate_layout(run_tcr_df: pd.DataFrame, gr
     run_tcr_df : pd.DataFrame
         DataFrame containing TCRs and their group assignments.
     grouping_col : str
-        Column name for TCR group assignment (required).
+        Column name for TCR group assignment. Groups are often associated with projects or studies.
+        For example, groups "vdjdb_v2" and "project_melanoma". TCRs from different groups are currently not assigned to the same plate.
+    library_col: str
+        Column defining libraries within groups. For example, defining the YLQ and GLC TCR libraries within group "vdjdb_v2".
     well_plate_size : int, default=384
         Maximum wells per plate.
+    fixed_well_assignment_map_path : str or None
+        Path to a CSV with columns ``custom_name``, ``plate_number``, ``well`` that pins
+        specific TCRs to exact plate/well positions. TCRs not present in this map are
+        assigned via the template mechanism (with plate numbering starting after the last
+        fixed plate). No half-fill check is applied to fixed-well groups.
+        Only supported for ``well_plate_size=384``.
 
     Returns
     -------
     plates_df_dict : defaultdict(pd.DataFrame)
         Dictionary of plates where keys are plate numbers and values are plate DataFrames containing TCRs assigned to wells of that plate.
     """
-    if not grouping_col:
-        raise ValueError("run_tcr_df needs to have a TCR grouping column!")
+    if grouping_col not in run_tcr_df.columns:
+        raise ValueError(f"{grouping_col} not found in run_tcr_df")
+
+    if library_col not in run_tcr_df.columns:
+        raise ValueError(f"{library_col} not found in run_tcr_df")
 
     if "well" in run_tcr_df.columns:
         raise Exception("Well column already exists in input DataFrame! Were TCRs already assigned to wells?")
 
-    if well_plate_size == 384:
-        tcr_assignment_plate_df_stack_384 = pd.read_excel(
-            os.path.join(
-                tcr_toolbox_data_path,
-                "tcr_toolbox_datasets",
-                "tcr_assembly",
-                "tcr_assignment_plate_layout",
-                "tcr_assignment_plate_layout_stack_384.xlsx",
-            )
-        )
-    else:
-        raise NotImplementedError(f"{well_plate_size}-well plates have not been implementend yet!")
-
     plates_df_dict = collections.defaultdict(pd.DataFrame)
-    plate_counter = 1
-    plate_assignments = []
+    fixed_plate_nums: set = set()
+    well_map = None
 
-    for group in run_tcr_df.loc[:, grouping_col].unique():
-        group_df = run_tcr_df.loc[run_tcr_df.loc[:, grouping_col] == group, :].copy()
-        n_tcrs = len(group_df)
-        full_plates, remainder = divmod(n_tcrs, well_plate_size)
+    if fixed_well_assignment_map_path is not None:
+        if well_plate_size != 384:
+            raise NotImplementedError(f"fixed_well_assignment_map_path is only supported for 384-well plates (got {well_plate_size})")
+        well_map = pd.read_csv(fixed_well_assignment_map_path)
+        for col in ("custom_name", "plate_number", "well"):
+            if col not in well_map.columns:
+                raise ValueError(f"fixed_well_assignment_map must contain column '{col}'")
 
-        if remainder and remainder < well_plate_size // 2:
-            raise ValueError(
-                f"Group '{group}' would have a last plate with {remainder} TCRs (< half of {well_plate_size})!\nWe only assemble at least half-filled last plates per group.\nPlease remove plate by removing its TCRs or add TCRS until plate is at least half-filled."
+        fixed_names = set(well_map["custom_name"])
+        fixed_mask = run_tcr_df["custom_name"].isin(fixed_names)
+        fixed_df = run_tcr_df[fixed_mask].merge(well_map, on="custom_name", how="left")
+        template_df = run_tcr_df[~fixed_mask].copy()
+
+        for plate_num, df_plate in fixed_df.groupby("plate_number"):
+            plates_df_dict[plate_num] = _build_fixed_well_plate(df_plate)
+            if plates_df_dict[plate_num][grouping_col].dropna().unique().shape[0] > 1:
+                raise Exception(f"plate {plate_num} got assigned more than one group {plates_df_dict[plate_num][grouping_col].dropna().unique()}!")
+
+        fixed_plate_nums = set(plates_df_dict.keys())
+        plate_counter = (max(plates_df_dict.keys()) + 1) if plates_df_dict else 1
+    else:
+        template_df = run_tcr_df
+        plate_counter = 1
+
+    if not template_df.empty:
+        if well_plate_size == 384:
+            tcr_assignment_plate_df_stack_384 = pd.read_excel(
+                os.path.join(tcr_toolbox_data_path, "tcr_toolbox_datasets", "tcr_assembly", "tcr_assignment_plate_layout", "tcr_assignment_plate_layout_stack_384.xlsx")
             )
+        else:
+            raise NotImplementedError(f"{well_plate_size}-well plates have not been implementend yet!")
 
-        group_df = group_df.reset_index(drop=True)
-        num_plates = full_plates + (1 if remainder else 0)
-        plates_for_group = np.repeat(np.arange(plate_counter, plate_counter + num_plates), well_plate_size)[:n_tcrs]
-        group_df.loc[:, "plate_number"] = plates_for_group
-        plate_counter += num_plates
-        plate_assignments.append(group_df)
+        plate_assignments = []
 
-    all_df = pd.concat(plate_assignments, ignore_index=True)
+        for group in template_df.loc[:, grouping_col].unique():
+            group_df = template_df.loc[template_df.loc[:, grouping_col] == group, :].copy()
+            n_tcrs = len(group_df)
+            full_plates, remainder = divmod(n_tcrs, well_plate_size)
 
-    for plate_num, df_plate in all_df.groupby("plate_number", sort=True):
-        df_plate = df_plate.reset_index(drop=True).reindex(range(well_plate_size))
-        plates_df_dict[plate_num] = assign_tcrs_to_wells_from_layout(df_plate, tcr_assignment_plate_df_stack_384)
+            if remainder and remainder < well_plate_size // 2:
+                raise ValueError(
+                    f"Group '{group}' would have a last plate with {remainder} TCRs (< half of {well_plate_size})!\n"
+                    "We only assemble at least half-filled last plates per group.\n"
+                    "Please remove plate by removing its TCRs or add TCRS until plate is at least half-filled."
+                )
 
-    plate_to_group = {plate_num: df.loc[:, grouping_col].iloc[0] for plate_num, df in plates_df_dict.items() if not df.empty}
+            group_df = group_df.sort_values(by=library_col, kind="stable").reset_index(drop=True)
+            num_plates = full_plates + (1 if remainder else 0)
+            plates_for_group = np.repeat(np.arange(plate_counter, plate_counter + num_plates), well_plate_size)[:n_tcrs]
+            group_df.loc[:, "plate_number"] = plates_for_group
+            plate_counter += num_plates
+            plate_assignments.append(group_df)
 
-    for plate_num in sorted(plates_df_dict.keys()):
-        print(f"Writing {plate_to_group[plate_num]} to plate: {plate_num}")
+        all_df = pd.concat(plate_assignments, ignore_index=True)
+
+        for plate_num, df_plate in all_df.groupby("plate_number", sort=True):
+            df_plate = df_plate.reset_index(drop=True).reindex(range(well_plate_size))
+            plates_df_dict[plate_num] = assign_tcrs_to_wells_from_layout(df_plate, tcr_assignment_plate_df_stack_384)
+            if plates_df_dict[plate_num][grouping_col].dropna().unique().shape[0] > 1:
+                raise Exception(f"plate {plate_num} got assigned more than one group {plates_df_dict[plate_num][grouping_col].dropna().unique()}! This should not be possible!")
+
+    if fixed_plate_nums:
+        for plate_num in sorted(fixed_plate_nums):
+            df = plates_df_dict[plate_num]
+            expected_occupied = set(well_map.loc[well_map["plate_number"] == plate_num, "well"])
+            actual_occupied = set(df.loc[df["custom_name"].notna(), "well"])
+            if expected_occupied != actual_occupied:
+                missing = sorted(expected_occupied - actual_occupied)
+                extra = sorted(actual_occupied - expected_occupied)
+                raise Exception(f"plate {plate_num} occupied wells out of sync with fixed_well_assignment_map: missing {missing}, unexpected {extra}")
+
+    plate_to_group = {plate_num: df[grouping_col].dropna().iloc[0] for plate_num, df in plates_df_dict.items() if not df.empty}
+
+    for plate_num in plates_df_dict.keys():  # here we do not want sorted to check how plates were written
+        df = plates_df_dict[plate_num]
+        n_occupied = int(df["custom_name"].notna().sum())
+        n_blank = int(df["custom_name"].isna().sum())
+        if plate_num in fixed_plate_nums:
+            print(
+                f"Writing {plate_to_group[plate_num]} to plate: {plate_num} "
+                f"(fixed assignment: {n_occupied} TCRs, {n_blank} intentionally blank wells "
+                f"per fixed_well_assignment_map)"
+            )
+        else:
+            print(f"Writing {plate_to_group[plate_num]} to plate: {plate_num} ({n_occupied} TCRs, {n_blank} blank wells)")
+
+    if not set(run_tcr_df[library_col]) == {v for df in plates_df_dict.values() for v in df[library_col].dropna().unique()}:
+        raise Exception(f"{library_col} in run_tcr_df is out of sync with {library_col} in plates_df_dict!")
 
     return plates_df_dict
 
 
-def add_plate_ortho_primer_combinations_to_cdr3j_seqs(plates_df_dict: collections.defaultdict[pd.DataFrame], remove_longer_than_200_nt: bool = True):
+def add_plate_ortho_primer_combinations_to_cdr3j_seqs(plates_df_dict: collections.defaultdict[pd.DataFrame], plates_order_list: list, remove_longer_than_200_nt: bool = True):
     """Add 384-well plate sub-pool-specific Fw + Rev ortho primers and well-specific ortho primers to CDR3-J + 4-base
     overhangs + BbsI recognition sites order nucleotide sequences.
 
@@ -1006,26 +1070,20 @@ def add_plate_ortho_primer_combinations_to_cdr3j_seqs(plates_df_dict: collection
         raise NotImplementedError(f"{plates_df_dict[1].shape[0]}-well plate orthoprimer combination assignment has not been implemented yet!")
 
     plate_primers_df = pd.read_excel(
-        os.path.join(
-            tcr_toolbox_data_path,
-            "tcr_toolbox_datasets",
-            "tcr_assembly",
-            "final_ortho_primer_combination_source_target_dispense_sheets",
-            "plate_pool_primers_df.xlsx",
-        ),
+        os.path.join(tcr_toolbox_data_path, "tcr_toolbox_datasets", "tcr_assembly", "final_ortho_primer_combination_source_target_dispense_sheets", "plate_pool_primers_df.xlsx"),
         index_col=0,
     )
 
     run_sub_pool = 1
-    for i, plate in enumerate(plates_df_dict.keys()):
+    for plate in plates_order_list:
+        if ((plate - 1) != 0) and ((plate - 1) % plate_primers_df.shape[0] == 0):
+            run_sub_pool += 1
+
         print("run_sub_pool:", run_sub_pool)
         print("plate:", plate)
         plates_df_dict[plate] = pd.merge(plates_df_dict[plate], final_ortho_combination_assignment_df, how="left", on="well")
 
-        if (i != 0) and (i % plate_primers_df.shape[0] == 0):
-            run_sub_pool += 1
-
-        plate_primer_int = i % plate_primers_df.shape[0]
+        plate_primer_int = (plate - 1) % plate_primers_df.shape[0]
         plates_df_dict[plate]["run_sub_pool"] = run_sub_pool
 
         for idx in plates_df_dict[plate].index:
@@ -1064,7 +1122,9 @@ def add_plate_ortho_primer_combinations_to_cdr3j_seqs(plates_df_dict: collection
     return plates_df_dict
 
 
-def make_tcr_assembly_run_cdr3j_seq_order_sheets(plates_df_dict: pd.DataFrame, run_path: Union[str, os.PathLike[str]], numbered_run_name: str, name_annotation_cols: list = None):
+def make_tcr_assembly_run_cdr3j_seq_order_sheets(
+    plates_df_dict: pd.DataFrame, run_path: Union[str, os.PathLike[str]], numbered_run_name: str, plates_order_list: list, name_annotation_cols: list = None
+):
     """Write Twist CDR3-J oligo pool order sheet(s). One order .xlsx sheet is written per 9 plates.
 
     Parameters
@@ -1088,7 +1148,7 @@ def make_tcr_assembly_run_cdr3j_seq_order_sheets(plates_df_dict: pd.DataFrame, r
 
     """
     run_sub_pool_dict = collections.defaultdict(int)
-    for plate in plates_df_dict.keys():
+    for plate in plates_order_list:
         print("Preparing plate:", plate)
         run_sub_pool_dict[plate] = plates_df_dict[plate]["run_sub_pool"].unique()[0]
 
@@ -1118,7 +1178,19 @@ def make_tcr_assembly_run_cdr3j_seq_order_sheets(plates_df_dict: pd.DataFrame, r
             raise Exception("Plate df index was not reset!")
 
         if plates_df_dict[plate]["cdr3j_alpha_nt_order_primers"].isna().any() or plates_df_dict[plate]["cdr3j_beta_nt_order_primers"].isna().any():
-            print("Removing NaN CDR3-J seqs from plate:", plate, "!", "If you did not expect these NaNs, plate requires manual inspection!")
+            df = plates_df_dict[plate]
+            nan_mask = df["cdr3j_alpha_nt_order_primers"].isna() | df["cdr3j_beta_nt_order_primers"].isna()
+            n_intentional = int((nan_mask & df["custom_name"].isna()).sum())
+            occupied_dropped = df.loc[nan_mask & df["custom_name"].notna(), "well"].tolist()
+            msg = f"Removing NaN CDR3-J seqs from plate: {plate} ({n_intentional} intentionally blank wells"
+            if occupied_dropped:
+                msg += (
+                    f", {len(occupied_dropped)} occupied wells dropped: {occupied_dropped} "
+                    f"verify these match earlier removals (e.g., >200nt primer filter); "
+                    f"otherwise inspect manually"
+                )
+            msg += ")"
+            print(msg)
             plates_df_dict[plate].dropna(subset=["cdr3j_alpha_nt_order_primers", "cdr3j_beta_nt_order_primers"], inplace=True)
             plates_df_dict[plate].reset_index(drop=True, inplace=True)
 
@@ -1132,16 +1204,16 @@ def make_tcr_assembly_run_cdr3j_seq_order_sheets(plates_df_dict: pd.DataFrame, r
 
         run_sub_pool_order_df_dict[run_sub_pool] = pd.concat([run_sub_pool_order_df_dict[run_sub_pool], tmp_alpha_plate_df, tmp_beta_plate_df])
 
-    for idx, sequence in enumerate(run_sub_pool_order_df_dict[run_sub_pool]["sequence"]):
-        if len(sequence) > 200:
-            print(
-                "Sequence idx",
-                idx,
-                "is longer than 200 nt!",
-                "Sequence length:",
-                len(sequence),
-                "As having oligo sequences longer than 200 nt will substantially increase oligo pool price, you might want to order this TCR separately and remove TCR sequence from oligo pool by setting remove_longer_than_200_nt = True in add_plate_ortho_primer_combinations_to_cdr3j_seqs!",
-            )
+        for idx, sequence in enumerate(run_sub_pool_order_df_dict[run_sub_pool]["sequence"]):
+            if len(sequence) > 200:
+                print(
+                    "Sequence idx",
+                    idx,
+                    "is longer than 200 nt!",
+                    "Sequence length:",
+                    len(sequence),
+                    "As having oligo sequences longer than 200 nt will substantially increase oligo pool price, you might want to order this TCR separately and remove TCR sequence from oligo pool by setting remove_longer_than_200_nt = True in add_plate_ortho_primer_combinations_to_cdr3j_seqs!",
+                )
 
     for run_sub_pool in run_sub_pool_order_df_dict.keys():
         run_sub_pool_order_df_dict[run_sub_pool].reset_index(inplace=True, drop=True)
@@ -1342,19 +1414,26 @@ def replace_tube_in_v_rack(v_rack_most_recent_df_dict: dict, tube_df: pd.DataFra
 
     barcodes_before = v_rack_most_recent_df_dict[va_vb]["V_tube_barcode"].unique()
     v_rack_loc = v_rack_most_recent_df_dict[va_vb]["TRAV_or_TRBV"] == str(tube_df["TRAV_or_TRBV"][0])
-    if run_mode == "run_assembly":
-        for col in [  # 'V_rack_name', # 'V_rack_barcode', #'V_rack_well', # 'TRAV_or_TRBV'
-            "V_tube_barcode",
-            "uL_in_tube",
-        ]:
+
+    for col in [  # 'V_rack_name', # 'V_rack_barcode', #'V_rack_well', # 'TRAV_or_TRBV'
+        "V_tube_barcode",
+        "uL_in_tube",
+    ]:
+        if run_mode == "run_assembly":
             print("col:", col)
             print("vrack value:", v_rack_most_recent_df_dict[va_vb].loc[v_rack_loc, col].values)
             print("tube value:", tube_df[col][0])
-            v_rack_most_recent_df_dict[va_vb].loc[v_rack_loc, col] = tube_df[col][0]
+
+        v_rack_most_recent_df_dict[va_vb].loc[v_rack_loc, col] = tube_df[col][
+            0
+        ]  # You need to replace tubes in all run_modes but only write v_rack_most_recent_df_dict in run_assembly mode
+
+        if run_mode == "run_assembly":
             print("rack value after replacement:", v_rack_most_recent_df_dict[va_vb].loc[v_rack_loc, col].values)
             print()
-        barcodes_after = v_rack_most_recent_df_dict[va_vb]["V_tube_barcode"].unique()
 
+    if run_mode == "run_assembly":
+        barcodes_after = v_rack_most_recent_df_dict[va_vb]["V_tube_barcode"].unique()
         print(f"Difference (removed tube) of tube barcodes before and after: {set(barcodes_before).difference(set(barcodes_after))}")
         print(f"Difference (added tube) of tube barcodes before and after: {set(barcodes_after).difference(set(barcodes_before))}")
         print(f"tmp tube barcode: {tube_df['V_tube_barcode'][0]}")
@@ -1394,14 +1473,13 @@ def track_v_barcode_tubes_and_v_usage(hamilton_log_mode: Literal[".csv", ".trc"]
         rack_file_list_va_vb = [file_name for file_name in rack_file_list if va_vb in file_name]
         rack_file_list_va_vb = sorted(rack_file_list_va_vb, key=lambda x: x.split("_")[0] + x.split("_")[1])
         v_rack_lists[va_vb] = rack_file_list_va_vb
-        v_rack_most_recent_df_dict[va_vb] = pd.read_csv(os.path.join(new_full_V_rack_hamilton_log_path, v_rack_lists[va_vb][-1]))
+        v_rack_most_recent_df_dict[va_vb] = pd.read_csv(os.path.join(new_full_V_rack_hamilton_log_path, v_rack_lists[va_vb][-1]), dtype={"V_tube_barcode": str})
 
     most_recent_va_rack = v_rack_lists["Va"][-1]
     most_recent_vb_rack = v_rack_lists["Vb"][-1]
     most_recent_va_datetime = most_recent_va_rack.split("_")[0]
     most_recent_vb_datetime = most_recent_vb_rack.split("_")[0]
-    if run_mode == "run_assembly":
-        print("Most recent v-racks:", most_recent_va_rack, most_recent_vb_rack, "\n")
+    print("Most recent v-racks:", most_recent_va_rack, most_recent_vb_rack, "\n")
 
     # # check if the most recent alpha and beta date is the same
     if most_recent_va_datetime != most_recent_vb_datetime:
@@ -1459,7 +1537,7 @@ def track_v_barcode_tubes_and_v_usage(hamilton_log_mode: Literal[".csv", ".trc"]
             tmp_tube_time = path.split("_")[0] + path.split("_")[1]
             if tmp_tube_time > most_recent_rack_datetime:
                 path_new_tube_scan = os.path.join(new_V_barcode_tube_scan_log_path, path)
-                tmp_tube = pd.read_csv(path_new_tube_scan)
+                tmp_tube = pd.read_csv(path_new_tube_scan, dtype={"V_tube_barcode": str})
                 if run_mode == "run_assembly":
                     print(f"######## current tube:{str(tmp_tube['TRAV_or_TRBV'][0])} ({path}) ########")
                 v_rack_most_recent_df_dict = replace_tube_in_v_rack(v_rack_most_recent_df_dict=v_rack_most_recent_df_dict, tube_df=tmp_tube, va_vb=va_vb, run_mode=run_mode)
@@ -1490,8 +1568,8 @@ def track_v_barcode_tubes_and_v_usage(hamilton_log_mode: Literal[".csv", ".trc"]
     rack_scan_list_sorted = sorted(os.listdir(V_rack_position_scan_log_path), key=lambda x: x.split("_")[0] + x.split("_")[1])
     rack_scan_list_vb = [file_name for file_name in rack_scan_list_sorted if "Vb" in file_name]
     rack_scan_list_va = [file_name for file_name in rack_scan_list_sorted if "Va" in file_name]
-    most_recent_vb_scan_df = pd.read_csv(os.path.join(V_rack_position_scan_log_path, rack_scan_list_vb[-1]))
-    most_recent_va_scan_df = pd.read_csv(os.path.join(V_rack_position_scan_log_path, rack_scan_list_va[-1]))
+    most_recent_vb_scan_df = pd.read_csv(os.path.join(V_rack_position_scan_log_path, rack_scan_list_vb[-1]), dtype={"V_tube_barcode": str})
+    most_recent_va_scan_df = pd.read_csv(os.path.join(V_rack_position_scan_log_path, rack_scan_list_va[-1]), dtype={"V_tube_barcode": str})
 
     for va_vb in ["Va", "Vb"]:
         v_rack = v_rack_most_recent_df_dict[va_vb]
@@ -1501,10 +1579,11 @@ def track_v_barcode_tubes_and_v_usage(hamilton_log_mode: Literal[".csv", ".trc"]
         v_scan = v_scan.loc[:index_cutoff]
 
         if not all(v_scan["V_tube_barcode"].values == v_rack["V_tube_barcode"].values):
-            # # check if barcodes match
-            raise Exception(
-                f"v_tube_barcodesscan barcodes {v_scan['V_tube_barcode'].values}rack barcodes {v_rack['V_tube_barcode'].values}Va tube barcodes do not match between most recent scan and v_rack_most_recent_df!"
-            )
+            scan_barcodes = set(v_scan["V_tube_barcode"].values)
+            rack_barcodes = set(v_rack["V_tube_barcode"].values)
+            missing_in_scan = rack_barcodes - scan_barcodes
+            missing_in_rack = scan_barcodes - rack_barcodes
+            raise Exception(f"{va_vb} tube barcodes do not match!\nBarcodes missing in scan: {sorted(missing_in_scan)}\nBarcodes missing in rack: {sorted(missing_in_rack)}")
 
         for well in v_scan["V_rack_well"].unique():
             well_scan = v_scan[v_scan["V_rack_well"] == well]
@@ -1531,11 +1610,13 @@ def track_v_barcode_tubes_and_v_usage(hamilton_log_mode: Literal[".csv", ".trc"]
             vb_rack.to_csv(vb_new_rack_path, index=False)
             print("New v-rack saved:", va_new_rack_path, vb_new_rack_path)
 
+        return v_rack_most_recent_df_dict, va_new_rack_path, vb_new_rack_path
+
     else:
         if run_mode == "run_assembly":
             print("No new tubes or pipetting done, not writing new v-rack.")
 
-    return v_rack_most_recent_df_dict
+        return v_rack_most_recent_df_dict, None, None
 
 
 def make_idot_v_gene_premixing_dispense_csv(
@@ -1543,6 +1624,8 @@ def make_idot_v_gene_premixing_dispense_csv(
     source_name: str,
     run_path: Union[str, os.PathLike[str]],
     transfer_volume_nl: float,
+    plates_order_list: list,
+    cleanup_state: dict,
     numbered_run_name: str = "",
     max_idot_vol_nl: float = 70_000,
     v_gene_hamilton_ul: float = 21.11,
@@ -1641,7 +1724,7 @@ def make_idot_v_gene_premixing_dispense_csv(
     """
     minimum_vol = min_v_gene_stock_tube_vol_ul
 
-    run_tcr_df = pd.concat([plates_df_dict[plate] for plate in plates_df_dict.keys()])
+    run_tcr_df = pd.concat([plates_df_dict[plate] for plate in plates_order_list])
 
     if run_tcr_df["cdr3j_alpha_nt_order_primers"].isna().any() or run_tcr_df["cdr3j_beta_nt_order_primers"].isna().any():
         raise Exception("NaN CDR3-J + ortho primer order sequences should not occur, as these were removed by make_tcr_assembly_run_cdr3j_seq_order_sheets from plates_df_dict!")
@@ -1676,11 +1759,7 @@ def make_idot_v_gene_premixing_dispense_csv(
 
     v_gene_assignment_idot_source_plate_df = pd.read_excel(
         os.path.join(
-            tcr_toolbox_data_path,
-            "tcr_toolbox_datasets",
-            "tcr_assembly",
-            "v_gene_assignment_idot_source_plate_layout",
-            "v_gene_assignment_idot_source_plate_layout_stack.xlsx",
+            tcr_toolbox_data_path, "tcr_toolbox_datasets", "tcr_assembly", "v_gene_assignment_idot_source_plate_layout", "v_gene_assignment_idot_source_plate_layout_stack.xlsx"
         )
     )
     v_gene_assignment_idot_source_plate_df["well"] = v_gene_assignment_idot_source_plate_df["well_letter"] + v_gene_assignment_idot_source_plate_df["well_number"].astype(str)
@@ -1737,7 +1816,7 @@ def make_idot_v_gene_premixing_dispense_csv(
     if run_mode == "run_assembly":
         va_new_rack_path_log = os.path.join(new_full_V_rack_hamilton_log_path, f"{current_date}_v_rack_update_log.txt")
         # track_v_barcode_tubes_and_v_usage is called inside the wrap_and_log_to_file for logging to file
-        v_rack_most_recent_df_dict = log_function_to_file(
+        v_rack_most_recent_df_dict, va_new_rack_path, vb_new_rack_path = log_function_to_file(
             func=track_v_barcode_tubes_and_v_usage,
             print_log_file_path=va_new_rack_path_log,
             # function params:
@@ -1746,9 +1825,15 @@ def make_idot_v_gene_premixing_dispense_csv(
         )
     elif run_mode in ("oligo_order", "simulation"):
         # track_v_barcode_tubes_and_v_usage is called inside the wrap_and_log_to_file for logging to file
-        v_rack_most_recent_df_dict = track_v_barcode_tubes_and_v_usage(hamilton_log_mode=".trc", run_mode=run_mode)
+        va_new_rack_path_log = None
+        v_rack_most_recent_df_dict, va_new_rack_path, vb_new_rack_path = track_v_barcode_tubes_and_v_usage(hamilton_log_mode=".trc", run_mode=run_mode)
     else:
         raise NotImplementedError("Other run_modes than oligo_order and run_assembly are not implemented yet!")
+
+    # All None if not run_mode == "run_assembly"
+    cleanup_state["va_new_rack_path"] = va_new_rack_path
+    cleanup_state["vb_new_rack_path"] = vb_new_rack_path
+    cleanup_state["va_new_rack_path_log"] = va_new_rack_path_log
 
     v_rack_most_recent_df_va_vb = pd.concat([v_rack_most_recent_df_dict["Va"].copy().reset_index(drop=True), v_rack_most_recent_df_dict["Vb"].copy().reset_index(drop=True)])
     v_rack_most_recent_df_va_vb["TRAV_or_TRBV"] = v_rack_most_recent_df_va_vb["TRAV_or_TRBV"].str.replace("/", "_")
@@ -1775,7 +1860,7 @@ def make_idot_v_gene_premixing_dispense_csv(
         target_plate_format=96,
         also_write_csv=True,
     )
-    if skip_barcoded_v_gene_stock_tube_vol_update:
+    if not skip_barcoded_v_gene_stock_tube_vol_update:
         # check how much volume is left in the v-rack tubes after the transfer is hypothetically done (only for warning)
         v_gene_vols_substract_in_run = v_rack_to_idot_worklist_df[["matcher_ID", "Vol"]].groupby("matcher_ID").sum()
 
@@ -1822,7 +1907,7 @@ def make_idot_v_gene_premixing_dispense_csv(
     if not all(v_both_usage_check_df.loc[dispense_df_value_counts.index, "count"] == dispense_df_value_counts):
         raise Exception("Usage counts do not overlap between run both usage sheet and final idot dispense csv!")
 
-    return run_tcr_df, dispense_df, dispense_df_value_counts, v_both_usage_check_df
+    return run_tcr_df
 
 
 def make_echo_v_gene_premixing_dispense_csv(
@@ -1830,55 +1915,25 @@ def make_echo_v_gene_premixing_dispense_csv(
     source_name: str,
     run_path: Union[str, os.PathLike[str]],
     transfer_volume_nl: float,
+    plates_order_list: list,
+    cleanup_state: dict,
     numbered_run_name: str = "",
-    max_echo_vol_nl: int = 50,
+    max_echo_vol_nl: float = 50_000,
+    v_gene_hamilton_ul: float = 17.15,  # may already be difficult to pipette reliably with Hamilton 50 µL tips
+    water_hamilton_ul: float = 47.85,
+    min_v_gene_stock_tube_vol_ul: float = 50.00,
     run_mode: str = "oligo_order",
-    skip_barcoded_v_gene_tube_vol_update: bool = False,
+    skip_barcoded_v_gene_stock_tube_vol_update: bool = False,
 ):
     """Write echo V gene premixing instruction csv file.
 
     This function likely will not be used anymore because we are not acquiring an Echo dispenser anymore.
     However, the function might be useful for collaborators that have an Echo dispenser.
 
-    Parameters
-    ----------
-    plates_df_dict : dict
-        Dictionary where keys are plate numbers and values are DataFrames that store plate data. Has to be generated by
-        make_tcr_assembly_run_cdr3j_seq_order_sheets.
-    source_name : str
-        Name of the V gene 384-well echo source plate from which is dispensed.
-    run_path: Union[str, os.PathLike[str]],
-        String path to the standardized assembly run directory that was initialized with
-        init_tcr_assembly_run_dir.
-    transfer_volume_nl : float = 0.00
-        V gene volume to dispense in nL.
-    numbered_run_name : str
-        Name of the assembly run.
-    max_echo_vol_nl : int = 50
-        Maximum 384-well echo plate source well volume that can be dispensed from.
-
-    Returns
-    -------
-    run_tcr_df : pd.DataFrame
-        DataFrame that contains all TCRs of the assembly run that was generated by concatenating all plate DataFrames in
-        the plates_df_dict and by removing empty wells. This DataFrame is only used for manual inspect and not
-        used by any functions after this function.
-
-    Examples
-    --------
-    >>> source_name = 'cd4_source_1' # you should be able to write this label on the echo source plate
-    >>> run_tcr_df = make_echo_v_gene_premixing_dispense_csv(plates_df_dict = plates_df_dict,
-    ...                                                      source_name = source_name,
-    ...                                                      run_path = run_path,
-    ...                                                      transfer_volume_nl = 1.00 * 1000, # Echo needs nanoliter instructions
-    ...                                                      numbered_run_name = numbered_run_name,
-    ...                                                      max_echo_vol_nl = 50 * 1000 # Echo needs nanoliter instructions
-    ...                                                     )
     """
-    print(
-        "WARNING: make_idot_v_gene_premixing_dispense_csv() only generates the wet-lab tested Echo dispense .CSV file — it does NOT produce the Hamilton pipetting .XLSX worklist for preparing the Echo 384-well source plate."
-    )
-    run_tcr_df = pd.concat([plates_df_dict[plate] for plate in plates_df_dict.keys()])
+    minimum_vol = min_v_gene_stock_tube_vol_ul
+
+    run_tcr_df = pd.concat([plates_df_dict[plate] for plate in plates_order_list])
 
     # It took approximately 20 min to pre-mix a full 384-well plate on the Echo
     print("Estimation of hours needed to pre-mix run V genes on Echo:", round((run_tcr_df.shape[0] / 384) * 20 / 60, 2))
@@ -1888,14 +1943,20 @@ def make_echo_v_gene_premixing_dispense_csv(
     if run_tcr_df["cdr3j_alpha_nt_order_primers"].isna().any() or run_tcr_df["cdr3j_beta_nt_order_primers"].isna().any():
         raise Exception("NaN CDR3-J + ortho primer order sequences should not occur, as these were removed by make_tcr_assembly_run_cdr3j_seq_order_sheets from plates_df_dict!")
 
+    if (v_gene_hamilton_ul + water_hamilton_ul) != ((max_echo_vol_nl / 1000) + 15):
+        raise Exception(
+            "max_echo_vol_nl does not match what is added by the Hamilton to the echo source wells!",
+            "v_gene_hamilton_ul + water_hamilton_ul needs to be equal to (max_echo_vol_nl/1000) + 15 uL dead volume!",
+        )
+
     v_alphas_usage_df, v_betas_usage_df = count_run_v_gene_usage(run_path=run_path, numbered_run_name=numbered_run_name, run_tcr_df=run_tcr_df)
 
-    v_alphas_usage_df.reset_index(inplace=True)
-    v_alphas_usage_df.rename({"index": "TRAV_or_TRBV"}, axis=1, inplace=True)
+    v_alphas_usage_df["TRAV_or_TRBV"] = v_alphas_usage_df.index
+    v_alphas_usage_df = v_alphas_usage_df.reset_index(drop=True)
     v_alphas_usage_df["number_of_echo_wells_needed"] = v_alphas_usage_df["count"].div((max_echo_vol_nl / 1000)).apply(np.ceil)
 
-    v_betas_usage_df.reset_index(inplace=True)
-    v_betas_usage_df.rename({"index": "TRAV_or_TRBV"}, axis=1, inplace=True)
+    v_betas_usage_df["TRAV_or_TRBV"] = v_betas_usage_df.index
+    v_betas_usage_df = v_betas_usage_df.reset_index(drop=True)
     v_betas_usage_df["number_of_echo_wells_needed"] = v_betas_usage_df["count"].div((max_echo_vol_nl / 1000)).apply(np.ceil)
 
     v_both_usage_df = pd.concat([v_alphas_usage_df, v_betas_usage_df])
@@ -1912,11 +1973,7 @@ def make_echo_v_gene_premixing_dispense_csv(
 
     v_gene_assignment_echo_source_plate_df = pd.read_excel(
         os.path.join(
-            tcr_toolbox_data_path,
-            "tcr_toolbox_datasets",
-            "tcr_assembly",
-            "v_gene_assignment_echo_source_plate_layout",
-            "v_gene_assignment_echo_source_plate_layout_stack.xlsx",
+            tcr_toolbox_data_path, "tcr_toolbox_datasets", "tcr_assembly", "v_gene_assignment_echo_source_plate_layout", "v_gene_assignment_echo_source_plate_layout_stack.xlsx"
         )
     )
     v_gene_assignment_echo_source_plate_df["well"] = v_gene_assignment_echo_source_plate_df["well_letter"] + v_gene_assignment_echo_source_plate_df["well_number"].astype(str)
@@ -1925,6 +1982,8 @@ def make_echo_v_gene_premixing_dispense_csv(
     v_gene_echo_source_plate = (
         pd.merge(v_gene_assignment_echo_source_plate_df, v_both_usage_df, how="left", left_index=True, right_index=True).drop("v_gene", axis=1).reset_index(drop=True)
     )
+    v_gene_echo_source_plate = v_gene_echo_source_plate[~v_gene_echo_source_plate.loc[:, "TRAV_or_TRBV"].isna()].copy()
+    v_gene_echo_source_plate["plate"] = source_name
 
     v_gene_echo_source_plate.to_excel(os.path.join(run_path, "v_genes_premix_dispense", source_name + ".xlsx"))
 
@@ -1963,8 +2022,98 @@ def make_echo_v_gene_premixing_dispense_csv(
         max_source_plate_volume_nl=max_echo_vol_nl,
     )
 
-    v_both_usage_check_df.set_index("TRAV_or_TRBV", inplace=True)
+    if skip_barcoded_v_gene_stock_tube_vol_update:
+        run_mode = "simulation"
 
+    now = datetime.datetime.now()
+    current_date = now.strftime("%Y%m%d_%H%M%S")
+    new_full_V_rack_hamilton_log_path = os.path.join(v_gene_barcode_tracing_path, "new_full_V_rack_hamilton_log", "log")
+
+    if run_mode == "run_assembly":
+        va_new_rack_path_log = os.path.join(new_full_V_rack_hamilton_log_path, f"{current_date}_v_rack_update_log.txt")
+        # track_v_barcode_tubes_and_v_usage is called inside the wrap_and_log_to_file for logging to file
+        v_rack_most_recent_df_dict, va_new_rack_path, vb_new_rack_path = log_function_to_file(
+            func=track_v_barcode_tubes_and_v_usage,
+            print_log_file_path=va_new_rack_path_log,
+            # function params:
+            hamilton_log_mode=".trc",
+            run_mode=run_mode,
+        )
+    elif run_mode in ("oligo_order", "simulation"):
+        # track_v_barcode_tubes_and_v_usage is called inside the wrap_and_log_to_file for logging to file
+        va_new_rack_path_log = None
+        v_rack_most_recent_df_dict, va_new_rack_path, vb_new_rack_path = track_v_barcode_tubes_and_v_usage(hamilton_log_mode=".trc", run_mode=run_mode)
+    else:
+        raise NotImplementedError("Other run_modes than oligo_order and run_assembly are not implemented yet!")
+
+    # All None if not run_mode == "run_assembly"
+    cleanup_state["va_new_rack_path"] = va_new_rack_path
+    cleanup_state["vb_new_rack_path"] = vb_new_rack_path
+    cleanup_state["va_new_rack_path_log"] = va_new_rack_path_log
+
+    v_rack_most_recent_df_va_vb = pd.concat([v_rack_most_recent_df_dict["Va"].copy().reset_index(drop=True), v_rack_most_recent_df_dict["Vb"].copy().reset_index(drop=True)])
+    v_rack_most_recent_df_va_vb["TRAV_or_TRBV"] = v_rack_most_recent_df_va_vb["TRAV_or_TRBV"].str.replace("/", "_")
+    v_rack_to_echo_instructions_path = os.path.join(run_path, "v_genes_premix_dispense", f"{current_date}_{source_name}_hamilton_v-rack_to_echo-source_worklist.xlsx")
+
+    v_rack_to_echo_worklist_df = write_hamilton_pipetting_excel_sheet(
+        target_plates_list=[source_name],  # --> echo plate name
+        source_df_plates_col_name="V_rack_barcode",  # --> alpha rack of beta rack barcode
+        target_df_plates_col_name="plate",  # --> barcode voor hamilton dilutions (run_id)
+        source_df=v_rack_most_recent_df_va_vb,  # --> concat alpha en beta rack met identifier voor alpha en beta rack (col_name)
+        target_df=v_gene_echo_source_plate,  # --> 384 wells voor echo v-gene plate
+        source_match_col_name="TRAV_or_TRBV",  # --> TRAV_or_TRBV (v-gene col)
+        target_match_col_name="TRAV_or_TRBV",
+        source_df_well_col_name="V_rack_well",
+        target_df_well_col_name="well",
+        max_source_plate_volume_ul=max(v_rack_most_recent_df_va_vb["uL_in_tube"]),  # --> max vol rack tubes (of all tubes in rack)
+        excel_write_path=v_rack_to_echo_instructions_path,  # --> path to write excel sheet
+        target_annotation_col_names_list=None,  # --> columns to also take (annotations)
+        # volume_col_name: str = '',                    # --> target df can code how much vol (optional, this or
+        transfer_volume_ul=v_gene_hamilton_ul,  # --> transfer vol of v-gene (optional, this or volume_col_name)
+        # volume_solvent_col_name: str = '',            # --> optional
+        volume_solvent_ul=water_hamilton_ul,  # --> optional
+        target_plate_format=384,
+        also_write_csv=True,
+    )
+    if not skip_barcoded_v_gene_stock_tube_vol_update:
+        # check how much volume is left in the v-rack tubes after the transfer is hypothetically done (only for warning)
+        v_gene_vols_substract_in_run = v_rack_to_echo_worklist_df[["matcher_ID", "Vol"]].groupby("matcher_ID").sum()
+
+        v_gene_not_enough_volume_msg_list = []
+
+        # Iterate over v_genes and their required transfer volumes
+        for v_gene, vol in zip(v_gene_vols_substract_in_run.index.to_list(), v_gene_vols_substract_in_run["Vol"].to_list()):
+            # Current volume in the rack before transfer
+            vol_before = v_rack_most_recent_df_va_vb.loc[v_rack_most_recent_df_va_vb["TRAV_or_TRBV"] == v_gene, "uL_in_tube"].iloc[0]
+
+            # Compute the remaining volume after this transfer
+            vol_after = vol_before - vol
+
+            # Check if this would drop below the minimum allowed
+            if vol_after < minimum_vol:
+                total_needed_vol = v_gene_echo_source_plate.loc[v_gene_echo_source_plate["TRAV_or_TRBV"] == v_gene, :].shape[0] * v_gene_hamilton_ul
+                tmp_msg = (
+                    f"{v_gene} has less than {minimum_vol} µL left in the tube after transfer!\n"
+                    f"Total needed {v_gene} volume is: {total_needed_vol} µL.\n"
+                    f"Current {v_gene} batch volume is: {vol_before} µL.\n"
+                    f"During CDR3-J oligo pool manufacturing, the current batch of {v_gene} needs "
+                    "to be replaced\nwith a new batch before this assembly "
+                    f"run can be performed!\n"
+                )
+                v_gene_not_enough_volume_msg_list.append(tmp_msg)
+
+        # Handle exceptions as before
+        if v_gene_not_enough_volume_msg_list:
+            if run_mode in ("oligo_order", "simulation"):
+                formatted_msgs = [f"WARNING: {msg}" for msg in v_gene_not_enough_volume_msg_list]
+                print("\n".join(formatted_msgs))
+            elif run_mode == "run_assembly":
+                formatted_msgs = [f"ERROR: {msg}" for msg in v_gene_not_enough_volume_msg_list]
+                reminder_msg = "Reminder: Run run_mode = oligo_order first to identify tubes that require replacement before performing the wet-lab run_assembly mode!"
+                formatted_msgs.append(f"ERROR: {reminder_msg}")
+                raise Exception("\n".join(formatted_msgs))
+
+    v_both_usage_check_df.set_index("TRAV_or_TRBV", inplace=True)
     if not set(v_both_usage_check_df.index) == set(dispense_df["Sample ID"].value_counts().index):
         raise Exception("Unique set of V genes do not overlap between run both usage sheet and final echo dispense csv!")
 
@@ -2041,13 +2190,7 @@ def pydna_plate_sub_pool_amp_pcr(run_sub_pool_file: Union[str, os.PathLike[str]]
     plate_beta_pcr_products_dict = collections.defaultdict(lambda: collections.defaultdict(list))
 
     plate_primers_df = pd.read_excel(
-        os.path.join(
-            tcr_toolbox_data_path,
-            "tcr_toolbox_datasets",
-            "tcr_assembly",
-            "final_ortho_primer_combination_source_target_dispense_sheets",
-            "plate_pool_primers_df.xlsx",
-        ),
+        os.path.join(tcr_toolbox_data_path, "tcr_toolbox_datasets", "tcr_assembly", "final_ortho_primer_combination_source_target_dispense_sheets", "plate_pool_primers_df.xlsx"),
         index_col=0,
     )
 
@@ -2087,7 +2230,7 @@ def pydna_plate_sub_pool_amp_pcr(run_sub_pool_file: Union[str, os.PathLike[str]]
             raise Exception("Rev CDR3-J alpha and beta primers do not match!")
 
         seen_plate_fw_primers_list.append(tmp_plate_df.loc[tmp_plate_df["alpha_or_beta"] == "alpha", "sequence"].str[0:20].values[0])
-        seen_plate_fw_primers_list.append(tmp_plate_df.loc[tmp_plate_df["alpha_or_beta"] == "alpha", "sequence"].str[-20:].values[0])
+        seen_plate_rev_primers_list.append(tmp_plate_df.loc[tmp_plate_df["alpha_or_beta"] == "alpha", "sequence"].str[-20:].values[0])
 
         if run_sub_pool == 1:
             plate_idx = plate - 1
@@ -2115,7 +2258,7 @@ def pydna_plate_sub_pool_amp_pcr(run_sub_pool_file: Union[str, os.PathLike[str]]
         raise Exception("There are duplicate plate sub-pool fw primers!", seen_plate_fw_primers_list)
 
     if len(seen_plate_rev_primers_list) != len(set(seen_plate_rev_primers_list)):
-        raise Exception("There are duplicate plate sub-pool fw primers!", seen_plate_fw_primers_list)
+        raise Exception("There are duplicate plate sub-pool rev primers!", seen_plate_rev_primers_list)
 
     return plate_alpha_pcr_products_dict, plate_beta_pcr_products_dict
 
@@ -2295,6 +2438,7 @@ def pydna_golden_gate_tcr_assembly(
     numbered_run_name: str,
     run_sub_pool: int,
     run_mode: str = "oligo_order",
+    v_gene_premix_dispenser: str = "idot",
 ):
     """
     Simulate TCR Golden Gate assembly for a TCR assembly run and generate a Golden Gate
@@ -2337,6 +2481,10 @@ def pydna_golden_gate_tcr_assembly(
     run_mode : str, default="oligo_order"
         Defines whether the function runs in planning (`oligo_order`), wet-lab execution (`run_assembly`),
         or dry-run (`simulation`) mode.
+    v_gene_premix_dispenser: str, default="idot"
+        Dispenser type for V gene dispensing. Options: 'idot', 'echo'.
+        `echo` has been successfully used in wet-lab but is not actively
+        maintained.
 
     Returns
     -------
@@ -2399,69 +2547,58 @@ def pydna_golden_gate_tcr_assembly(
     run_sub_pool_df = pd.read_excel(run_sub_pool_file)
     run_sub_pool_df["plate"] = run_sub_pool_df["name"].str.split("_").str[1].astype(int)
 
-    # Only the first line without header = 3 and on_bad_lines = 'skip' is needed when an echo v gene premix .csv would be read:
-    column_names = ["Source Well", "Target Well", "Volume [uL]", "Liquid Name", "Additional Volume Per Source Well", "a", "b", "c"]
-    v_genes_dispense_run_df = pd.read_csv(v_genes_premix_dispense_run_file, names=column_names, header=None, on_bad_lines="skip")
-    v_genes_dispense_run_df.rename({"Volume [uL]": "Transfer Volume"}, axis=1, inplace=True)
+    if v_gene_premix_dispenser == "idot":
+        # Only the first line without header = 3 and on_bad_lines = 'skip' is needed when an echo v gene premix .csv would be read:
+        column_names = ["Source Well", "Target Well", "Volume [uL]", "Liquid Name", "Additional Volume Per Source Well", "a", "b", "c"]
+        v_genes_dispense_run_df = pd.read_csv(v_genes_premix_dispense_run_file, names=column_names, header=None, on_bad_lines="skip")
+        v_genes_dispense_run_df.rename({"Volume [uL]": "Transfer Volume"}, axis=1, inplace=True)
 
-    header_idx_list = []
-    for well, idx in zip(v_genes_dispense_run_df.loc[:, "Source Well"], v_genes_dispense_run_df.loc[:, "Source Well"].index):
-        if well == "V_gene_pre-mixing":
-            header_idx_list.append(idx)
+        header_idx_list = []
+        for well, idx in zip(v_genes_dispense_run_df.loc[:, "Source Well"], v_genes_dispense_run_df.loc[:, "Source Well"].index):
+            if well == "V_gene_pre-mixing":
+                header_idx_list.append(idx)
 
-    index_ranges_to_remove = [list(np.arange(header_idx, header_idx + 3)) for header_idx in header_idx_list]
-    v_genes_dispense_run_df["Source Plate Name"] = pd.Series([np.nan] * len(v_genes_dispense_run_df), dtype=object)
-    v_genes_dispense_run_df["Target Plate Name"] = pd.Series([np.nan] * len(v_genes_dispense_run_df), dtype=object)
+        index_ranges_to_remove = [list(np.arange(header_idx, header_idx + 3)) for header_idx in header_idx_list]
+        v_genes_dispense_run_df["Source Plate Name"] = pd.Series([np.nan] * len(v_genes_dispense_run_df), dtype=object)
+        v_genes_dispense_run_df["Target Plate Name"] = pd.Series([np.nan] * len(v_genes_dispense_run_df), dtype=object)
 
-    for current_plate_indices, next_plate_indices in zip(index_ranges_to_remove, index_ranges_to_remove[1:] + [None]):
-        source_plate = v_genes_dispense_run_df.iloc[current_plate_indices[1], 1]
-        target_plate = int(v_genes_dispense_run_df.iloc[current_plate_indices[1], 5].split("_")[1])
+        for current_plate_indices, next_plate_indices in zip(index_ranges_to_remove, index_ranges_to_remove[1:] + [None]):
+            source_plate = v_genes_dispense_run_df.iloc[current_plate_indices[1], 1]
+            target_plate = int(v_genes_dispense_run_df.iloc[current_plate_indices[1], 5].split("_")[1])
 
-        if next_plate_indices:
-            v_genes_dispense_run_df.loc[current_plate_indices[2] + 1 : next_plate_indices[0] - 1, "Source Plate Name"] = source_plate
-            v_genes_dispense_run_df.loc[current_plate_indices[2] + 1 : next_plate_indices[0] - 1, "Target Plate Name"] = target_plate
-        else:
-            v_genes_dispense_run_df.loc[current_plate_indices[2] + 1 : v_genes_dispense_run_df.shape[0], "Source Plate Name"] = source_plate
-            v_genes_dispense_run_df.loc[current_plate_indices[2] + 1 : v_genes_dispense_run_df.shape[0], "Target Plate Name"] = target_plate
+            if next_plate_indices:
+                v_genes_dispense_run_df.loc[current_plate_indices[2] + 1 : next_plate_indices[0] - 1, "Source Plate Name"] = source_plate
+                v_genes_dispense_run_df.loc[current_plate_indices[2] + 1 : next_plate_indices[0] - 1, "Target Plate Name"] = target_plate
+            else:
+                v_genes_dispense_run_df.loc[current_plate_indices[2] + 1 : v_genes_dispense_run_df.shape[0], "Source Plate Name"] = source_plate
+                v_genes_dispense_run_df.loc[current_plate_indices[2] + 1 : v_genes_dispense_run_df.shape[0], "Target Plate Name"] = target_plate
 
-    indices_to_remove = [idx for sublist in index_ranges_to_remove for idx in sublist]
-    v_genes_dispense_run_df.drop(indices_to_remove, axis=0, inplace=True)
-    v_genes_dispense_run_df.reset_index(inplace=True, drop=True)
+        indices_to_remove = [idx for sublist in index_ranges_to_remove for idx in sublist]
+        v_genes_dispense_run_df.drop(indices_to_remove, axis=0, inplace=True)
+        v_genes_dispense_run_df.reset_index(inplace=True, drop=True)
 
-    v_genes_dispense_run_df.drop([column for column in v_genes_dispense_run_df.columns if column in ["a", "b", "c"]], axis=1, inplace=True)
-    v_genes_dispense_run_df.drop(["Additional Volume Per Source Well"], axis=1, inplace=True)
-    v_genes_dispense_run_df.reset_index(inplace=True, drop=True)
+        v_genes_dispense_run_df.drop([column for column in v_genes_dispense_run_df.columns if column in ["a", "b", "c"]], axis=1, inplace=True)
+        v_genes_dispense_run_df.drop(["Additional Volume Per Source Well"], axis=1, inplace=True)
+        v_genes_dispense_run_df.reset_index(inplace=True, drop=True)
+
+    elif v_gene_premix_dispenser == "echo":
+        v_genes_dispense_run_df = pd.read_csv(v_genes_premix_dispense_run_file, index_col=0)
+        echo_col_rename_dict = {"Destination Plate Name": "Target Plate Name", "Destination Well": "Target Well", "Sample ID": "Liquid Name"}
+        v_genes_dispense_run_df.rename(echo_col_rename_dict, inplace=True, axis=1)
+
+    else:
+        raise NotImplementedError(f"v_gene_premix_dispenser {v_gene_premix_dispenser} has not been implemented yet.")
 
     v_genes_dispense_source_df_dict = collections.defaultdict(pd.DataFrame)
     for source_df_file in v_genes_source_run_files_list:
         v_genes_dispense_source_df_dict[os.path.basename(source_df_file).split(".")[0]] = pd.read_excel(source_df_file, index_col=0)
 
     pMX_S1_Kana_2_record = list(
-        SeqIO.parse(
-            os.path.join(
-                tcr_toolbox_data_path,
-                "tcr_toolbox_datasets",
-                "tcr_assembly",
-                "plasmids",
-                "pMX_S1_Kana_2_cloning.dna",
-            ),
-            "snapgene",
-        ).records
+        SeqIO.parse(os.path.join(tcr_toolbox_data_path, "tcr_toolbox_datasets", "tcr_assembly", "plasmids", "pMX_S1_Kana_2_cloning.dna"), "snapgene").records
     )
     pMX_S1_Kana_2_record = Dseq(str(pMX_S1_Kana_2_record[0].seq), circular=True)
 
-    pMX_muTCRB_record = list(
-        SeqIO.parse(
-            os.path.join(
-                tcr_toolbox_data_path,
-                "tcr_toolbox_datasets",
-                "tcr_assembly",
-                "plasmids",
-                "muTRBC.dna",
-            ),
-            "snapgene",
-        ).records
-    )
+    pMX_muTCRB_record = list(SeqIO.parse(os.path.join(tcr_toolbox_data_path, "tcr_toolbox_datasets", "tcr_assembly", "plasmids", "muTRBC.dna"), "snapgene").records)
     pMX_muTCRB_record = Dseq(str(pMX_muTCRB_record[0].seq), circular=True)
 
     ligation_products_dict = collections.defaultdict(lambda: collections.defaultdict(lambda: collections.defaultdict(list)))
@@ -2479,7 +2616,7 @@ def pydna_golden_gate_tcr_assembly(
             for ortho_well in cdr3_alpha_product_dict[plate].keys():
                 tmp_error_str = ""
 
-                if (len(cdr3_alpha_product_dict[plate][ortho_well].keys()) > 2) | (len(cdr3_beta_product_dict[plate][ortho_well].keys()) > 2):
+                if (len(cdr3_alpha_product_dict[plate][ortho_well].keys()) > 1) | (len(cdr3_beta_product_dict[plate][ortho_well].keys()) > 1):
                     tmp_error_str += "CDR3 ortho PCR amplified more than one product!\n"
 
                 # TRAV:
@@ -2529,14 +2666,7 @@ def pydna_golden_gate_tcr_assembly(
 
                 trav = list(
                     SeqIO.parse(
-                        os.path.join(
-                            tcr_toolbox_data_path,
-                            "tcr_toolbox_datasets",
-                            "tcr_assembly",
-                            "plasmids",
-                            "TRV_plasmid_stocks_ordered_at_Twist",
-                            trav_name_str_tmp,
-                        ),
+                        os.path.join(tcr_toolbox_data_path, "tcr_toolbox_datasets", "tcr_assembly", "plasmids", "TRV_plasmid_stocks_ordered_at_Twist", trav_name_str_tmp),
                         "snapgene",
                     ).records
                 )
@@ -2544,14 +2674,7 @@ def pydna_golden_gate_tcr_assembly(
 
                 trbv = list(
                     SeqIO.parse(
-                        os.path.join(
-                            tcr_toolbox_data_path,
-                            "tcr_toolbox_datasets",
-                            "tcr_assembly",
-                            "plasmids",
-                            "TRV_plasmid_stocks_ordered_at_Twist",
-                            trbv_name_str_tmp,
-                        ),
+                        os.path.join(tcr_toolbox_data_path, "tcr_toolbox_datasets", "tcr_assembly", "plasmids", "TRV_plasmid_stocks_ordered_at_Twist", trbv_name_str_tmp),
                         "snapgene",
                     ).records
                 )
@@ -2651,31 +2774,11 @@ def pydna_golden_gate_eblock_tcr_assembly(
         raise Exception("group_df_dict keys do not equal eblock_df_dict keys!")
 
     pMX_S1_Kana_2_record = list(
-        SeqIO.parse(
-            os.path.join(
-                tcr_toolbox_data_path,
-                "tcr_toolbox_datasets",
-                "tcr_assembly",
-                "plasmids",
-                "pMX_S1_Kana_2_cloning.dna",
-            ),
-            "snapgene",
-        ).records
+        SeqIO.parse(os.path.join(tcr_toolbox_data_path, "tcr_toolbox_datasets", "tcr_assembly", "plasmids", "pMX_S1_Kana_2_cloning.dna"), "snapgene").records
     )
     pMX_S1_Kana_2_record = Dseq(str(pMX_S1_Kana_2_record[0].seq), circular=True)
 
-    pMX_muTCRB_record = list(
-        SeqIO.parse(
-            os.path.join(
-                tcr_toolbox_data_path,
-                "tcr_toolbox_datasets",
-                "tcr_assembly",
-                "plasmids",
-                "muTRBC.dna",
-            ),
-            "snapgene",
-        ).records
-    )
+    pMX_muTCRB_record = list(SeqIO.parse(os.path.join(tcr_toolbox_data_path, "tcr_toolbox_datasets", "tcr_assembly", "plasmids", "muTRBC.dna"), "snapgene").records)
     pMX_muTCRB_record = Dseq(str(pMX_muTCRB_record[0].seq), circular=True)
 
     ligation_products_dict = collections.defaultdict(lambda: collections.defaultdict(list))
@@ -2718,22 +2821,12 @@ def pydna_golden_gate_eblock_tcr_assembly(
                 trbv_name_str_tmp = trbv_name_str_tmp.replace("/", "_")
 
                 trav = list(
-                    SeqIO.parse(
-                        tcr_toolbox_data_path
-                        + "/tcr_toolbox_datasets/tcr_assembly/plasmids/TRV_plasmid_stocks_ordered_at_Twist/"
-                        + trav_name_str_tmp,
-                        "snapgene",
-                    ).records
+                    SeqIO.parse(tcr_toolbox_data_path + "/tcr_toolbox_datasets/tcr_assembly/plasmids/TRV_plasmid_stocks_ordered_at_Twist/" + trav_name_str_tmp, "snapgene").records
                 )
                 trav = Dseq(str(trav[0].seq), circular=True)
 
                 trbv = list(
-                    SeqIO.parse(
-                        tcr_toolbox_data_path
-                        + "/tcr_toolbox_datasets/tcr_assembly/plasmids/TRV_plasmid_stocks_ordered_at_Twist/"
-                        + trbv_name_str_tmp,
-                        "snapgene",
-                    ).records
+                    SeqIO.parse(tcr_toolbox_data_path + "/tcr_toolbox_datasets/tcr_assembly/plasmids/TRV_plasmid_stocks_ordered_at_Twist/" + trbv_name_str_tmp, "snapgene").records
                 )
                 trbv = Dseq(str(trbv[0].seq), circular=True)
 
@@ -2850,10 +2943,10 @@ def check_translation_assembled_tcr_ligation_products(
     {
         '1': {
               'A1': {
-                     'A1': True  # True if ligation product in ligation_products_dict input dictionary is not equal to reconstructed TCR of well 'A1'.
+                     'A1': True  # True if ligation product in ligation_products_dict input dictionary matches (is equal to) the reconstructed TCR of well 'A1'.
               },
               'A2': {
-                     'A2': True  # True if ligation product in ligation_products_dict input dictionary is not equal to reconstructed TCR of well 'A2'.
+                     'A2': True  # True if ligation product in ligation_products_dict input dictionary matches (is equal to) the reconstructed TCR of well 'A2'.
               },
               ...
         },
@@ -2861,7 +2954,7 @@ def check_translation_assembled_tcr_ligation_products(
               'A1': {  # No third level well key and value if no ligation product could be ligated and stored in ligation_products_dict input dictonary.
               },
               'A2': {
-                     'A2': False   # False if ligation product in ligation_products_dict input dictionary is not equal to reconstructed TCR of well 'A2'.
+                     'A2': False   # False if ligation product in ligation_products_dict input dictionary does not match (is not equal to) the reconstructed TCR of well 'A2'.
               },
               ...
         },

@@ -7,16 +7,19 @@ from dotenv import load_dotenv
 
 load_dotenv()
 tcr_toolbox_data_path = os.getenv("tcr_toolbox_data_path")
+if tcr_toolbox_data_path is None:
+    raise EnvironmentError("The 'tcr_toolbox_data_path' environment variable is not set (checked .env and the process environment).")
 
 
 def reconstruct_tcrs_assembly(
+    plates_df_dict: dict,  # was dataset
+    plates_order_list: list,
     include_leader: bool = True,
     include_constant: bool = True,
     mouse_or_human: str = "mouse",
     constant_beta: str = pydna_tcr_golden_gate_constant_aa_seq_dict["muTRBC_aa"],
     constant_alpha: str = pydna_tcr_golden_gate_constant_aa_seq_dict["muTRAC_aa"],
     exclude_c_fw: bool = False,
-    plates_df_dict: dict = None,  # was dataset
     verbose=False,
 ):
     """Reconstruct TCRs from a dataset file.
@@ -47,11 +50,17 @@ def reconstruct_tcrs_assembly(
     list
         List of reconstructed TCRs.
     """
-    translation_dict_aa = tcr_toolbox_data_path + "/tcr_toolbox_datasets/tcr_reconstruction/VDJ_gene_sequences/after_benchmark/functional_with_L-PART1+V-EXON_after_benchmark/20230803_vdj_translation_dict_aa.json"
+    translation_dict_aa = (
+        tcr_toolbox_data_path
+        + "/tcr_toolbox_datasets/tcr_reconstruction/VDJ_gene_sequences/after_benchmark/functional_with_L-PART1+V-EXON_after_benchmark/20230803_vdj_translation_dict_aa.json"
+    )
 
-    translation_dict_nt = tcr_toolbox_data_path + "/tcr_toolbox_datasets/tcr_reconstruction/VDJ_gene_sequences/after_benchmark/functional_with_L-PART1+V-EXON_after_benchmark/20230803_vdj_translation_dict_nt.json"
+    translation_dict_nt = (
+        tcr_toolbox_data_path
+        + "/tcr_toolbox_datasets/tcr_reconstruction/VDJ_gene_sequences/after_benchmark/functional_with_L-PART1+V-EXON_after_benchmark/20230803_vdj_translation_dict_nt.json"
+    )
 
-    for plate in plates_df_dict.keys():
+    for plate in plates_order_list:
         tmp_plate_df = plates_df_dict[plate].copy()
 
         # Fix to be able to use Bjørn's function:

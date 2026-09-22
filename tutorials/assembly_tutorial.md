@@ -62,9 +62,9 @@ Your TCR input CSV must include the following columns:
 | **TRBV_IMGT**    | TRBV gene in IMGT format (10X Genomics format works). |
 | **TRBJ_IMGT**    | TRBJ gene in IMGT format (10X Genomics format works). |
 | **cdr3_beta_aa** | CDR3 beta amino acid sequence. |
-| **custom_name**  | Custom TCR identifier. For example, a TCR with custom name `ywe_151_293` assigned to plate 2, well K14 will have the standardized assembly name: <br>`1_2_K14_253_ywe_151_293 → [oligo subpool]_[plate number]_[well]_[well number]_[custom name]`. |
-| **group**        | Assigns TCRs to plates in groups. <br> - Plates cannot contain multiple groups. <br> - If a group does not fully fill its last plate, it must occupy **at least half** of the plate. <br> **Example:** A patient `ywe` has 400 TCRs and a plate holds 384 wells: 1 full plate → 384 wells used, remaining → 16 wells. Half a plate = 192 wells → 16 wells is **not allowed**.|
-
+| **custom_name**  | Custom TCR identifier. For example, a TCR with custom name `patient01_151_293` assigned to plate 2, well K14 will have the standardized assembly name: <br>`1_2_K14_253_patient01_151_293 → [oligo subpool]_[plate number]_[well]_[well number]_[custom name]`. |
+| **group**        | Assigns TCRs to plates in groups. Groups are often defined by projects from a person e.g., `vdjdb_v2`. <br> - Plates cannot contain multiple groups. <br> - If a group does not fully fill its last plate, it must occupy **at least half** of the plate. <br> **Example:** A group `vdjdb_v2` has 400 TCRs and a plate holds 384 wells: 1 full plate → 384 wells used, remaining → 16 wells. Half a plate = 192 wells → 16 wells is **not allowed**. |
+| **library** | Assigns TCRs within TCR groups to one or multiple libraries. For example, defining the YLQ and GLC TCR libraries within group "vdjdb_v2". If you have only one library within your TCR group, all TCR can be assigned to the same library string name. |
 
 Start a pipeline run mode as follows:
 
@@ -95,6 +95,11 @@ tcr_toolbox run-tcr-assembly oligo_order_run_config_hla_loss.json
 # Copy and rename assembly config
 # Edit run_assembly_run_config_hla_loss.json as needed and run:
 tcr_toolbox run-tcr-assembly run_assembly_run_config_hla_loss.json
+```
+The default V gene dispenser is the I.DOT. You can also use I.DOT dispense instruction csv files to pipette manually.
+If you use an Echo dispenser, copy the echo run_config files e.g.,: 
+```bash
+cp TCRtoolbox/configs/tcr_assembly/echo_oligo_order_run_config.json echo_oligo_order_run_config_hla_loss.json
 ```
 
 Below we describe the purpose of each run mode and how parameters in their onfiguration JSON template files should 
@@ -128,7 +133,8 @@ tcr_toolbox run-tcr-assembly configs/tcr_assembly/simulation_run_config.json
   "run_name": "[insert run name here (replace whitespaces with '_' and no '*/@-./&%#!' symbols]",
   "run_path": null,
   "grouping_col": "group",
-  "oligo_name_annotation_col_list": null,
+  "library_col": "library",
+  "assemble_model_tcr_dict": null, 
   "filter_cannot_be_codon_optimized": true,
   "filter_succeeding_nt_cys_104_beta": false,
   "allow_cdr3j_nt_duplicates": false,
@@ -155,7 +161,8 @@ tcr_toolbox run-tcr-assembly configs/tcr_assembly/simulation_run_config.json
   "add_number_of_negatives_by_mutating_cdr3j_in_refs": null,
   "add_number_of_negatives_by_mutating_v_gene_in_refs": null,
   "min_nt_diff_negative_ref_seqs": null,
-  "max_nt_diff_negative_ref_seqs": null
+  "max_nt_diff_negative_ref_seqs": null,
+  "fixed_well_assignment_map_path": null
 }
 ```
 
@@ -188,7 +195,8 @@ tcr_toolbox run-tcr-assembly configs/tcr_assembly/oligo_order_run_config.json
   "run_name": "[insert run name here (replace whitespaces with '_' and no '*/@-./&%#!' symbols]",
   "run_path": null,
   "grouping_col": "group",
-  "oligo_name_annotation_col_list": null,
+  "library_col": "library",
+  "assemble_model_tcr_dict": null,
   "filter_cannot_be_codon_optimized": true,
   "filter_succeeding_nt_cys_104_beta": false,
   "allow_cdr3j_nt_duplicates": false,
@@ -215,7 +223,8 @@ tcr_toolbox run-tcr-assembly configs/tcr_assembly/oligo_order_run_config.json
   "add_number_of_negatives_by_mutating_cdr3j_in_refs": null,
   "add_number_of_negatives_by_mutating_v_gene_in_refs": null,
   "min_nt_diff_negative_ref_seqs": null,
-  "max_nt_diff_negative_ref_seqs": null
+  "max_nt_diff_negative_ref_seqs": null,
+  "fixed_well_assignment_map_path": null
 }
 ```
 ## 3. run_assembly mode
@@ -251,7 +260,8 @@ tcr_toolbox run-tcr-assembly configs/tcr_assembly/run_assembly_run_config.json
   "run_name": "[insert run name that matches numbered_run_name in run_path in the line below this line]",
   "run_path": "insert/path/to/your/numbered_run_name_directory",
   "grouping_col": "group",
-  "oligo_name_annotation_col_list": null,
+  "library_col": "library",
+  "assemble_model_tcr_dict": null,
   "filter_cannot_be_codon_optimized": true,
   "filter_succeeding_nt_cys_104_beta": false,
   "allow_cdr3j_nt_duplicates": false,
@@ -278,7 +288,8 @@ tcr_toolbox run-tcr-assembly configs/tcr_assembly/run_assembly_run_config.json
   "add_number_of_negatives_by_mutating_cdr3j_in_refs": null,
   "add_number_of_negatives_by_mutating_v_gene_in_refs": null,
   "min_nt_diff_negative_ref_seqs": null,
-  "max_nt_diff_negative_ref_seqs": null
+  "max_nt_diff_negative_ref_seqs": null,
+  "fixed_well_assignment_map_path": null
 }
 
 ```
@@ -295,6 +306,7 @@ standardized_run_directory/
 ├── pydna_logs/                     # pydna simulation log files
 ├── pydna_ligation_dicts/           # All TCRs ligated in pMX_S1_Kana_2 vector
 │                                   # Can generate SnapGene files via generate_snapgene_files
+├── library_pooling_plate_maps/     # pdf plate maps showing how libraries defined by group_col + library_col should be pooled
 └── sequencing_quality_analysis/    # Directory for TCR assembly QC FASTQ files
     └── references/                 # Illumina and nanopore reference files
 ```
@@ -315,12 +327,35 @@ Run name for output files and directories.
 Base directory for outputs. Required argument in `run_assembly` mode. Optional argument in `simulation and `oligo_order` mode. 
 
 - **`grouping_col`** : `str`, default=`'group'`
-Column in TCR input CSV used to group TCRs into plates.
+Column in TCR input CSV used to group TCRs into plates. Groups are often associated with projects from specific persons.
+For example, groups "vdjdb_v2" and "NKI_melanoma".
 
-- **`oligo_name_annotation_col_list`** : `list[str]` or `None`  
-Columns in TCR input CSV used to annotate oligo names. If `None`, defaults to `['custom_name']`. 
-For example, a TCR with custom name "ywe_151_293" assigned to plate 2, well K14 will have the standardized assembly name:
-1_2_K14_253_ywe_151_293 → [oligo subpool]_[plate number]_[well]_[well number]_[custom name].
+- **`library_col`** : `str`, default=`'library'`
+Column in TCR input CSV that defines libraries within TCR groups. For example, defining the YLQ and GLC TCR libraries within group "vdjdb_v2". If you have only one library within your TCR group, all TCR can be assigned to the same library string name. 
+
+- **`assemble_model_tcr_dict`** : `dict` or `None`, default=`None` 
+  Add model TCRs to libraries from TCR groups. `add_model_tcrs_to_libraries_from_groups_dict` has the following structure:
+
+  `{
+        "TCR group": {
+        "TCR library": ["model_tcr_name_1", "model_tcr_name_2"]
+        }
+  }`
+
+  Example (Note: "DMF4" is repeated twice to add "DMF4" to two different wells in the MEL063 library from the "NKI_melanoma" project):
+
+  `{
+        'vdjdb_v2': {
+        'YLQ': ["JM22", "r3_1_6_F4_63_YLQPRTFLL"],
+        'GLC': ["JM22", "r3_2_15_G16_171_GLCTLVAML]
+        },
+        'NKI_melanoma': {
+        'MEL063': ["MEL063_44_80", "DMF4", "DMF4"]
+        }}`
+
+  Supported model TCR names:
+  `["MEL063_44_80", "1G4", "DMF4", "DMF5", "C7", "JM22", "r3_1_6_D24_143_YLQPRTFLL", "r3_1_6_F4_63_YLQPRTFLL", "r3_2_15_G16_171_GLCTLVAML"]`
+  "MEL063_44_80" is a good HLA-A*02:01 positive control TCR for PAIR-scan because it is just reactive and will not consume too many well slots.
 
 - **`filter_cannot_be_codon_optimized`** : `bool`, default=`True`  
 Remove TCR sequences that cannot be codon optimized.
@@ -419,6 +454,30 @@ in `run_assembly` mode.
   - `min_nt_diff_negative_ref_seqs` : `int` or `None`  
   - `max_nt_diff_negative_ref_seqs` : `int` or `None`  
 
+- **`fixed_well_assignment_map_path`** : `str` or `os.PathLike` or `None`, default=`None`
+  Optional path to a CSV pinning specific TCRs to exact (plate, well) positions. TCRs listed
+  in the map are assigned to the specified wells; remaining TCRs are assigned via the standard
+  template-based flow (with plate numbering continuing after the last fixed plate). Use this
+  when certain wells must remain empty (for example, corner wells reserved as controls).
+  Only supported for `well_plate_size=384`.
+
+  Required CSV columns:
+
+  | Column | Description |
+  |---|---|
+  | `custom_name` | TCR custom name (must match `custom_name` in your input CSV). |
+  | `plate_number` | 1-indexed plate number that this TCR should be placed on. |
+  | `well` | Well coordinate, e.g. `B2`, `P24`. |
+
+  Example (3 TCRs on plate 1 starting at A3, leaving A1 and A2 empty as corner controls):
+  ```csv
+  custom_name,plate_number,well
+  fixed_tcr_001,1,A3
+  fixed_tcr_002,1,A4
+  fixed_tcr_003,1,A5
+  ```
+  Set `"fixed_well_assignment_map_path": "path/to/well_assignment_map.csv"` in your run config to use it.
+
 ## Make snapgene files of specific TCR names for further investigation:
 ```python
 from tcr_toolbox.tcr_assembly.order_automation import generate_snapgene_files
@@ -428,18 +487,18 @@ load_dotenv()
 tcr_toolbox_data_path = os.getenv('tcr_toolbox_data_path')
 
 # Long format TCR ID name
-os.mkdir(os.path.join(tcr_toolbox_data_path, "/tcr_toolbox_tcr_assembly_runs/r7_ywe_t500_nsclc57_no3lam397_1st_ylq_gen/tcr_snapgene_files"))
+os.mkdir(os.path.join(tcr_toolbox_data_path, "/tcr_toolbox_tcr_assembly_runs/r7_example_run/tcr_snapgene_files"))
 generate_snapgene_files(
-    tcr_list = ["1_2_K14_253_ywe_151_293", "1_3_B16_39_ywe_324_623"] 
-    output_path: os.path.join(tcr_toolbox_data_path, "/tcr_toolbox_tcr_assembly_runs/r7_ywe_t500_nsclc57_no3lam397_1st_ylq_gen/tcr_snapgene_files"),
-    run_path: os.path.join(tcr_toolbox_data_path, "/tcr_toolbox_tcr_assembly_runs/r7_ywe_t500_nsclc57_no3lam397_1st_ylq_gen/tcr_snapgene_files")
+    tcr_list = ["1_2_K14_253_patient01_151_293", "1_3_B16_39_patient01_324_623"] 
+    output_path: os.path.join(tcr_toolbox_data_path, "/tcr_toolbox_tcr_assembly_runs/r7_example_run/tcr_snapgene_files"),
+    run_path: os.path.join(tcr_toolbox_data_path, "/tcr_toolbox_tcr_assembly_runs/r7_example_run/tcr_snapgene_files")
 )
 # OR 
 # Short format TCR ID name: 
-os.mkdir(os.path.join(tcr_toolbox_data_path, "/tcr_toolbox_tcr_assembly_runs/r7_ywe_t500_nsclc57_no3lam397_1st_ylq_gen/tcr_snapgene_files"))
+os.mkdir(os.path.join(tcr_toolbox_data_path, "/tcr_toolbox_tcr_assembly_runs/r7_example_run/tcr_snapgene_files"))
 generate_snapgene_files(
     tcr_list = ["2_K14", "3_B16"] 
-    output_path: os.path.join(tcr_toolbox_data_path, "/tcr_toolbox_tcr_assembly_runs/r7_ywe_t500_nsclc57_no3lam397_1st_ylq_gen/tcr_snapgene_files"),
-    run_path: os.path.join(tcr_toolbox_data_path, "/tcr_toolbox_tcr_assembly_runs/r7_ywe_t500_nsclc57_no3lam397_1st_ylq_gen")
+    output_path: os.path.join(tcr_toolbox_data_path, "/tcr_toolbox_tcr_assembly_runs/r7_example_run/tcr_snapgene_files"),
+    run_path: os.path.join(tcr_toolbox_data_path, "/tcr_toolbox_tcr_assembly_runs/r7_example_run")
 )
 ```

@@ -13,13 +13,15 @@ from Bio.SeqUtils import CodonAdaptationIndex
 # dotenv
 load_dotenv()
 tcr_toolbox_data_path = os.getenv("tcr_toolbox_data_path")
+if tcr_toolbox_data_path is None:
+    raise EnvironmentError(
+        "The 'tcr_toolbox_data_path' environment variable is not set (checked .env and the process environment). "
+        "codon_optimizer.py needs it at import time to locate the reference genome fasta."
+    )
 
 # CAI
 reference_sequences = []
-reference_fasta = (
-    tcr_toolbox_data_path
-    + "/tcr_toolbox_datasets/tcr_assembly/ensembl_human_genome_fasta/reference_highly_expressed.fa"
-)
+reference_fasta = tcr_toolbox_data_path + "/tcr_toolbox_datasets/tcr_assembly/ensembl_human_genome_fasta/reference_highly_expressed.fa"
 # Load sequences into a list
 for record in SeqIO.parse(reference_fasta, "fasta"):
     seq = str(record.seq)
@@ -307,8 +309,8 @@ def codon_optimize(
                         else:
                             gc_higher = 0.70
                     else:
-                        if verbose == 1:
-                            print("Input sequence length is longer than 50 bp so max_gc_content_after_iterations cannot be used!")
+                        if verbose >= verbose_threshold[curr_it_weight]:
+                            print("Input sequence length is smaller than 50 bp so max_gc_content_after_iterations cannot be used!")
 
             if curr_it_weight == 2:
                 cai_lower = 0.75

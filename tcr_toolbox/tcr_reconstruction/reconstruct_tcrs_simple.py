@@ -47,6 +47,8 @@ def reconstruct_tcrs_simple(
     """
     load_dotenv()
     tcr_toolbox_data_path = os.getenv("tcr_toolbox_data_path")
+    if tcr_toolbox_data_path is None:
+        raise EnvironmentError("The 'tcr_toolbox_data_path' environment variable is not set (checked .env and the process environment).")
 
     # logger = init_logger("TCR_reconstruction.log", level_msg="INFO")
     tcr_toolbox_dir = tcr_toolbox_data_path + "/tcr_toolbox_datasets"

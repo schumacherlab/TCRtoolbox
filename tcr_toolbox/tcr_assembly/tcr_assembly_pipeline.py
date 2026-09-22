@@ -4,9 +4,10 @@ import os
 import re
 import shutil
 import ast
+import sys
 
 import pandas as pd
-from typing import Union
+from typing import Optional, Union
 from dotenv import load_dotenv
 
 from tcr_toolbox.sequencing_analysis.reference import generate_assembly_nanopore_nt_refs, generate_assembly_nt_refs
@@ -19,6 +20,7 @@ from tcr_toolbox.tcr_assembly.order_automation import (
     filter_tcr_df_on_v_genes_in_stock,
     init_oligo_order_run_dir,
     make_idot_v_gene_premixing_dispense_csv,
+    make_echo_v_gene_premixing_dispense_csv,
     make_tcr_assembly_run_cdr3j_seq_order_sheets,
     pydna_cdr3j_ortho_primer_amp_pcr,
     pydna_golden_gate_tcr_assembly,
@@ -26,9 +28,10 @@ from tcr_toolbox.tcr_assembly.order_automation import (
     translate_v_gene_input_to_imgt,
     validate_oligo_order_run_dir,
 )
+from tcr_toolbox.tcr_assembly.constants import model_tcr_annotation_dict
 from tcr_toolbox.tcr_reconstruction.constants import pydna_tcr_golden_gate_constant_aa_seq_dict
 from tcr_toolbox.tcr_reconstruction.reconstruction_tcr_assembly import reconstruct_tcrs_assembly
-from tcr_toolbox.utils.plot_utils import plot_v_genes_per_well
+from tcr_toolbox.utils.plot_utils import plot_v_genes_per_well, generate_color_dict, plot_custom_tcr_lib_pool_map
 
 load_dotenv()
 tcr_toolbox_data_path = os.getenv("tcr_toolbox_data_path")
@@ -91,9 +94,7 @@ def print_run_mode_info(run_mode: str):
 
 def init_run_dir(run_mode: str, run_name: str | None = None, run_path: str | os.PathLike | None = None, **kwargs):
     if not tcr_toolbox_data_path:
-        raise EnvironmentError(
-            "Environment variable 'tcr_toolbox_data_path' is not set. Did you create or edit your .env file with the correct path?"
-        )
+        raise EnvironmentError("Environment variable 'tcr_toolbox_data_path' is not set. Did you create or edit your .env file with the correct path?")
 
     implemented_run_modes = ["simulation", "oligo_order", "run_assembly"]
 
@@ -132,25 +133,40 @@ def init_run_dir(run_mode: str, run_name: str | None = None, run_path: str | os.
     return numbered_run_name, run_path_local, log_file
 
 
-def run_tcr_assembly(run_mode: str, numbered_run_name: str, run_path: str | None = None, **kwargs):
+def cleanup(run_mode: str, run_path: Union[str, os.PathLike[str]], cleanup_state: dict):
+    if run_mode == "simulation":
+        shutil.rmtree(run_path)
+    elif run_mode == "oligo_order":
+        shutil.rmtree(run_path)
+    elif run_mode == "run_assembly":
+        shutil.rmtree(os.path.join(run_path, "v_genes_premix_dispense"))
+        shutil.rmtree(os.path.join(run_path, "sequencing_quality_analysis"))
+        for pydna_log in glob.glob(os.path.join(run_path, "pydna_logs", "*")):
+            if pydna_log.endswith("_run_assembly.txt"):
+                os.remove(pydna_log)
+        if not cleanup_state["skip_barcoded_v_gene_stock_tube_vol_update"]:
+            for key in ["va_new_rack_path", "vb_new_rack_path", "va_new_rack_path_log"]:
+                path = cleanup_state.get(key)
+                if path and os.path.exists(path):
+                    os.remove(path)
+
+
+def run_tcr_assembly(run_mode: str, numbered_run_name: str, run_path: str | os.PathLike[str] | None = None, **kwargs):
     print_run_mode_info(run_mode=run_mode)
 
+    cleanup_state = {}
     try:
-        run_path_local = run_tcr_assembly_pipeline(run_mode=run_mode, numbered_run_name=numbered_run_name, run_path=run_path, **kwargs)
+        run_path_local = run_tcr_assembly_pipeline(run_mode=run_mode, numbered_run_name=numbered_run_name, cleanup_state=cleanup_state, run_path=run_path, **kwargs)
 
         return run_path_local
 
+    except KeyboardInterrupt:
+        sys.stderr.write("\nPipeline interrupted by user. Cleaning up...\n")
+        cleanup(run_mode=run_mode, run_path=run_path, cleanup_state=cleanup_state)
+        sys.exit(1)
+
     except Exception:
-        if run_mode == "simulation":
-            shutil.rmtree(run_path)
-        elif run_mode == "oligo_order":
-            shutil.rmtree(run_path)
-        elif run_mode == "run_assembly":
-            shutil.rmtree(os.path.join(run_path, "v_genes_premix_dispense"))
-            shutil.rmtree(os.path.join(run_path, "sequencing_quality_analysis"))
-            for pydna_log in glob.glob(os.path.join(run_path, "pydna_logs")):
-                if pydna_log.endswith("_run_assembly.txt"):
-                    os.remove(pydna_log)
+        cleanup(run_mode=run_mode, run_path=run_path, cleanup_state=cleanup_state)
         raise
 
 
@@ -158,9 +174,11 @@ def run_tcr_assembly_pipeline(
     run_mode: str,
     run_tcr_csv: Union[str, os.PathLike[str]],
     numbered_run_name: Union[str, None],
+    cleanup_state: dict,
     run_path: Union[str, os.PathLike[str], None] = None,
     grouping_col: str = "group",
-    oligo_name_annotation_col_list: list | None = None,
+    library_col: str = "library",
+    assemble_model_tcr_dict: dict = None,
     filter_cannot_be_codon_optimized: bool = True,
     filter_succeeding_nt_cys_104_beta: bool = False,
     allow_cdr3j_nt_duplicates: bool = False,
@@ -188,6 +206,7 @@ def run_tcr_assembly_pipeline(
     add_number_of_negatives_by_mutating_v_gene_in_refs: int = None,
     min_nt_diff_negative_ref_seqs: int = None,
     max_nt_diff_negative_ref_seqs: int = None,
+    fixed_well_assignment_map_path: Optional[str] = None,
 ) -> Union[str, os.PathLike[str]]:
     """
     Run the complete TCR assembly pipeline, including oligo ordering, in silico simulation,
@@ -241,9 +260,9 @@ def run_tcr_assembly_pipeline(
         - "TRBV_IMGT": TRBV gene in IMGT format (10X Genomics format works).
         - "TRBJ_IMGT": TRBJ gene in IMGT format (10X Genomics format works).
         - "cdr3_beta_aa": CDR3 beta amino acid sequence.
-        - "custom_name": Custom TCR name. For example, a TCR with custom name 'ywe_151_293' assigned to
+        - "custom_name": Custom TCR name. For example, a TCR with custom name 'patient01_151_293' assigned to
            plate 2, well K14 will have the standardized assembly name:
-           1_2_K14_253_ywe_151_293 → [oligo subpool]_[plate number]_[well]_[well number]_[custom name].
+           1_2_K14_253_patient01_151_293 → [oligo subpool]_[plate number]_[well]_[well number]_[custom name].
         - "group": Used to assign TCRs to plates in groups. Groups must fill at least half a plate
             if they cannot fully fill the last plate.
 
@@ -255,10 +274,35 @@ def run_tcr_assembly_pipeline(
         Deleted automatically in `simulation` mode.
 
     grouping_col : str, default='group'
-        Column name used to group TCRs into plates.
+        Column name used to group TCRs into plates. Groups are often associated with projects from specific persons.
+        For example, groups "vdjdb_v2" and "NKI_melanoma".
 
-    oligo_name_annotation_col_list : list of str or None
-        Columns from the input CSV used to annotate oligo names. Defaults to ['custom_name'].
+    library_col: str
+        Column defining libraries within TCR groups. For example, defining the YLQ and GLC TCR libraries within group "vdjdb_v2".
+
+    assemble_model_tcr_dict: dict, default=None
+        Add model TCRs to libraries from TCR groups. `assemble_model_tcr_dict` has the following structure:
+        {
+            "TCR group": {
+                "TCR library": ["model_tcr_name_1", "model_tcr_name_2"]
+            }
+        }
+
+        Example:
+        {
+            'vdjdb_v2': {
+                'YLQ': ["JM22", "r3_1_6_F4_63_YLQPRTFLL"],
+                'GLC': ["JM22", "r3_2_15_G16_171_GLCTLVAML],
+                ...
+            },
+            'NKI_melanoma': {
+                'MEL063': ["MEL063_44_80", "DMF4", "DMF4"] # Repeat "DMF4" twice to assemble "DMF4" twice in two different wells.
+            },
+            ...
+        }
+
+        Supported model TCR names:
+        ["MEL063_44_80", "1G4", "DMF4", "DMF5", "C7", "JM22", "r3_1_6_D24_143_YLQPRTFLL", "r3_1_6_F4_63_YLQPRTFLL", "r3_2_15_G16_171_GLCTLVAML"]
 
     filter_cannot_be_codon_optimized : bool, default=True
         Whether to remove TCR sequences that cannot be codon-optimized.
@@ -382,6 +426,14 @@ def run_tcr_assembly_pipeline(
     max_nt_diff_negative_ref_seqs : int or None
         Maximum nucleotide difference for negative reference sequences.
 
+    fixed_well_assignment_map_path : str or os.PathLike or None, default=None
+        Optional path to a CSV pinning specific TCRs to exact (plate, well) positions.
+        Required columns: ``custom_name``, ``plate_number``, ``well``. TCRs listed in
+        this map are assigned to the specified wells; remaining TCRs are assigned via
+        the standard template-based flow (with plate numbering continuing after the
+        last fixed plate). Use this when certain wells must remain empty, e.g. corner
+        wells reserved as controls. Only supported for ``well_plate_size=384``.
+
     Returns
     -------
     str or os.PathLike
@@ -405,24 +457,38 @@ def run_tcr_assembly_pipeline(
     and `pydna` simulation logging.
     - Generates sequencing reference files compatible with Illumina and Nanopore workflows.
     """
-    required_col_list = ["TRAV_IMGT", "TRAJ_IMGT", "cdr3_alpha_aa", "TRBV_IMGT", "TRBJ_IMGT", "cdr3_beta_aa", "custom_name", grouping_col]
+    if cleanup_state:
+        raise RuntimeError("cleanup_state should be empty at the start of the pipeline")
+    cleanup_state["skip_barcoded_v_gene_stock_tube_vol_update"] = skip_barcoded_v_gene_stock_tube_vol_update
 
-    if oligo_name_annotation_col_list is None:
-        oligo_name_annotation_col_list = ["custom_name"]
+    required_col_list = ["TRAV_IMGT", "TRAJ_IMGT", "cdr3_alpha_aa", "TRBV_IMGT", "TRBJ_IMGT", "cdr3_beta_aa", "custom_name", grouping_col, library_col]
 
     run_tcr_df = pd.read_csv(run_tcr_csv)
-
     missing_cols = [col for col in required_col_list if col not in run_tcr_df.columns]
     if missing_cols:
         raise ValueError(f"Missing required columns: {missing_cols}")
-
     run_tcr_df = run_tcr_df.loc[:, required_col_list]
 
     nan_columns = [col for col in run_tcr_df.columns if run_tcr_df[col].isna().any()]
-
     if nan_columns:
         error_msg = "The following required columns contain NaN values:\n" + "\n".join(f"- {col}: {run_tcr_df[col].isna().sum()} NaN(s)" for col in nan_columns)
         raise ValueError(error_msg)
+
+    if assemble_model_tcr_dict:
+        model_tcr_names = {tcr for group in assemble_model_tcr_dict.values() for library in group.values() for tcr in library}
+        invalid_set = model_tcr_names.difference(model_tcr_annotation_dict.keys())
+        if invalid_set:
+            raise ValueError(f"Invalid assemble_model_tcr_dict values: {sorted(invalid_set)}")
+
+        model_tcr_rows = []
+        for group_key, libraries in assemble_model_tcr_dict.items():
+            for library_key, tcr_names_list in libraries.items():
+                for tcr_name in tcr_names_list:
+                    annotation = model_tcr_annotation_dict[tcr_name].copy()
+                    annotation.pop("ag_name", None)
+                    model_tcr_row = {grouping_col: group_key, library_col: library_key, "custom_name": tcr_name, **annotation}
+                    model_tcr_rows.append(model_tcr_row)
+        run_tcr_df = pd.concat([run_tcr_df, pd.DataFrame(model_tcr_rows)], ignore_index=True)
 
     run_tcr_df = translate_v_gene_input_to_imgt(
         run_tcr_df=run_tcr_df,
@@ -460,14 +526,40 @@ def run_tcr_assembly_pipeline(
         )
 
         print("\nAssigning TCRs to wells in plates...")
-        plates_df_dict = add_standardized_tcr_assembly_well_plate_layout(run_tcr_df=run_tcr_df, grouping_col=grouping_col, well_plate_size=well_plate_size)
+        plates_df_dict = add_standardized_tcr_assembly_well_plate_layout(
+            run_tcr_df=run_tcr_df,
+            grouping_col=grouping_col,
+            library_col=library_col,
+            well_plate_size=well_plate_size,
+            fixed_well_assignment_map_path=fixed_well_assignment_map_path,
+        )
+        plates_order_list = sorted(plates_df_dict.keys())
+        libraries_list = list(run_tcr_df[library_col].dropna().unique())
+        library_color_dict = generate_color_dict(libraries_list)
 
         print("\n\nAdding well-specific orthoprimer combinations to CDR3-J order nucleotide sequences:")
-        plates_df_dict = add_plate_ortho_primer_combinations_to_cdr3j_seqs(plates_df_dict=plates_df_dict, remove_longer_than_200_nt=remove_longer_than_200_nt_oligos)
+        plates_df_dict = add_plate_ortho_primer_combinations_to_cdr3j_seqs(
+            plates_df_dict=plates_df_dict, plates_order_list=plates_order_list, remove_longer_than_200_nt=remove_longer_than_200_nt_oligos
+        )
+
+        print("\nPlotting library pooling map pdfs:")
+        for plate in plates_order_list:
+            plot_custom_tcr_lib_pool_map(
+                plate_df=plates_df_dict[plate],
+                lib_col=library_col,
+                lib_col_dict=library_color_dict,
+                plate_name=plate,
+                well_col="well",
+                outs_dir=os.path.join(run_path, "library_pooling_plate_maps"),
+            )
 
         print("\n\nMaking CDR3-J nucleotide oligo pool order sheets:")
         plates_df_dict = make_tcr_assembly_run_cdr3j_seq_order_sheets(
-            plates_df_dict=plates_df_dict, run_path=run_path, numbered_run_name=numbered_run_name, name_annotation_cols=oligo_name_annotation_col_list
+            plates_df_dict=plates_df_dict,
+            run_path=run_path,
+            numbered_run_name=numbered_run_name,
+            plates_order_list=plates_order_list,
+            name_annotation_cols=["custom_name"],
         )
 
     if run_mode == "run_assembly":
@@ -482,7 +574,8 @@ def run_tcr_assembly_pipeline(
             plates_df_dict[plate_num].dropna(subset=["cdr3j_alpha_nt_order_primers", "cdr3j_beta_nt_order_primers"], inplace=True)
             plates_df_dict[plate_num].reset_index(drop=True, inplace=True)
 
-        tcr_refs_df = pd.concat([tcr_df for tcr_df in plates_df_dict.values()])
+        plates_order_list = sorted(plates_df_dict.keys())
+        tcr_refs_df = pd.concat([plates_df_dict[plate] for plate in plates_order_list])
         tcr_refs_df.reset_index(drop=True, inplace=True)
         if tcr_refs_df.loc[:, "name"].duplicated().any():
             raise Exception("There are duplicate TCR names. Did you manually edit the .xlsx plate sheets?")
@@ -490,7 +583,7 @@ def run_tcr_assembly_pipeline(
             raise Exception("There are missing TCR names. Did you manually edit the .xlsx plate sheets?")
 
         print("\n")
-        for plate in plates_df_dict.keys():
+        for plate in plates_order_list:
             print("Plotting V gene plate map:", plate)
             plot_v_genes_per_well(
                 plates_df_dict[plate],
@@ -502,8 +595,10 @@ def run_tcr_assembly_pipeline(
             )
 
         print("\n\nWriting v gene premix dispense instruction files:")
-    elif run_mode in ("oligo_order", "simulation"):
+
+    if run_mode in ("simulation", "oligo_order"):
         print("\n\nChecking whether V gene stock tubes have enough remaing volume for this assembly:")
+
     source_name = re.search(r"(r\d+)_", numbered_run_name).group(1) + "_source_1"
     if v_gene_premix_dispenser == "idot":
         run_tcr_df = make_idot_v_gene_premixing_dispense_csv(
@@ -511,6 +606,8 @@ def run_tcr_assembly_pipeline(
             source_name=source_name,
             run_path=run_path,
             transfer_volume_nl=v_gene_transfer_volume_nl,
+            plates_order_list=plates_order_list,
+            cleanup_state=cleanup_state,
             numbered_run_name=numbered_run_name,
             max_idot_vol_nl=max_v_gene_source_well_volume_nl,
             v_gene_hamilton_ul=v_gene_hamilton_ul,
@@ -520,8 +617,24 @@ def run_tcr_assembly_pipeline(
             skip_barcoded_v_gene_stock_tube_vol_update=skip_barcoded_v_gene_stock_tube_vol_update,
         )
     elif v_gene_premix_dispenser == "echo":
-        raise NotImplementedError(
-            "`make_echo_v_gene_premixing_dispense_csv` function needs to be updated to\ncorrectly update the volumes of V gene stock tubes in our V gene stock database."
+        # raise NotImplementedError(
+        #     "`make_echo_v_gene_premixing_dispense_csv` function needs to be updated to\ncorrectly update the volumes of V gene stock tubes in our V gene stock database."
+        # )
+        print("WARNING: writing echo premix dispense instruction csv files should work but has been tested less than writing idot instruction csv files.")
+        run_tcr_df = make_echo_v_gene_premixing_dispense_csv(
+            plates_df_dict=plates_df_dict,
+            source_name=source_name,
+            run_path=run_path,
+            transfer_volume_nl=v_gene_transfer_volume_nl,
+            plates_order_list=plates_order_list,
+            cleanup_state=cleanup_state,
+            numbered_run_name=numbered_run_name,
+            max_echo_vol_nl=max_v_gene_source_well_volume_nl,
+            v_gene_hamilton_ul=v_gene_hamilton_ul,
+            water_hamilton_ul=water_hamilton_ul,
+            min_v_gene_stock_tube_vol_ul=min_v_gene_stock_tube_vol_ul,
+            run_mode=run_mode,
+            skip_barcoded_v_gene_stock_tube_vol_update=skip_barcoded_v_gene_stock_tube_vol_update,
         )
     else:
         raise NotImplementedError(f"v_gene_premix_dispenser {v_gene_premix_dispenser} has not been implemented yet.")
@@ -529,13 +642,14 @@ def run_tcr_assembly_pipeline(
     print("\n\nTCR assembly preparation run finished!\nStarting in sillico pydna simulation ligation product check of assembly run.")
     print("\nReconstructing TCR amino acid sequence:")
     plates_df_dict = reconstruct_tcrs_assembly(
+        plates_df_dict=plates_df_dict,
+        plates_order_list=plates_order_list,
         include_leader=True,
         include_constant=True,
         mouse_or_human="mouse",
         constant_beta=pydna_tcr_golden_gate_constant_aa_seq_dict["muTRBC_aa"],
         constant_alpha=pydna_tcr_golden_gate_constant_aa_seq_dict["muTRAC_aa"],
         exclude_c_fw=False,
-        plates_df_dict=plates_df_dict,
         verbose=False,
     )
 
@@ -565,8 +679,13 @@ def run_tcr_assembly_pipeline(
         )
 
         print("Simulating Golden Gate:")
+        if v_gene_premix_dispenser == "idot":
+            v_genes_premix_dispense_run_file = os.path.join(run_path, "v_genes_premix_dispense", numbered_run_name + "_idot_dispense.csv")
+        elif v_gene_premix_dispenser == "echo":
+            v_genes_premix_dispense_run_file = os.path.join(run_path, "v_genes_premix_dispense", numbered_run_name + "_echo_dispense.csv")
+
         ligation_products_dict = pydna_golden_gate_tcr_assembly(
-            v_genes_premix_dispense_run_file=os.path.join(run_path, "v_genes_premix_dispense", numbered_run_name + "_idot_dispense.csv"),
+            v_genes_premix_dispense_run_file=v_genes_premix_dispense_run_file,
             v_genes_source_run_files_list=[os.path.join(run_path, "v_genes_premix_dispense", source_name + ".xlsx")],
             cdr3_alpha_product_dict=cdr3_alpha_product_dict,
             cdr3_beta_product_dict=cdr3_beta_product_dict,
@@ -575,6 +694,7 @@ def run_tcr_assembly_pipeline(
             numbered_run_name=numbered_run_name,
             run_sub_pool=run_sub_pool,
             run_mode=run_mode,
+            v_gene_premix_dispenser=v_gene_premix_dispenser,
         )
 
         print("Comparing amino acid translation of ligation product to reconstructed TCR amino acid sequence:")

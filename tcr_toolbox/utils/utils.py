@@ -3,6 +3,7 @@ import itertools
 import os
 import io
 import random
+import ast
 from typing import Literal, Union
 
 import numpy as np
@@ -88,7 +89,7 @@ def levenshtein_ratio(seq1, seq2):
 
 def add_well_coordinates(plate_df):
     if "well" not in plate_df.columns:
-        raise "Please add well column to add well coordinates"
+        raise ValueError("Please add well column to add well coordinates")
 
     plate_df["well_coord"] = plate_df["well"].apply(lambda x: (ord(x[0]) - 64, int(x[1:])))
     plate_df["row"] = plate_df["well_coord"].apply(lambda x: chr(x[0] + 64))
@@ -382,7 +383,7 @@ def write_echo_dispense_csv(
     target_source_subset_iter_list: list = None,
     target_source_subset_iter_col_name: str = "",
     volume_col_name: str = "",
-    transfer_volume_nl: float = 0.00,  # echo needs nanoliter instructions
+    transfer_volume_nl: float = 150,  # echo needs nanoliter instructions
     max_source_plate_volume_nl: int = 50 * 1000,  # echo needs nanoliter instructions
 ):
     """Write an echo dispense .csv sheet:
@@ -573,7 +574,7 @@ def write_idot_dispense_csv(
     target_source_subset_iter_list: list = None,
     target_source_subset_iter_col_name: str = "",
     volume_col_name: str = "",
-    transfer_volume_nl: float = 0.00,
+    transfer_volume_nl: float = 150,
     max_source_plate_volume_nl: int = 68_000,
 ):
     """
@@ -760,15 +761,9 @@ def write_idot_dispense_csv(
     if len(dispense_df["Source Plate Name"].unique()) > 1:
         raise Exception("There is more than one source plate in dispense_df, while we currently support only one source plate!")
 
-    header_df = pd.read_csv(
-        os.path.join(
-            tcr_toolbox_data_path,
-            "tcr_toolbox_datasets",
-            "tcr_assembly",
-            "v_gene_assignment_idot_source_plate_layout",
-            "idot_header_template.csv",
-        )
-    )
+    if tcr_toolbox_data_path is None:
+        raise EnvironmentError("The 'tcr_toolbox_data_path' environment variable is not set (checked .env and the process environment).")
+    header_df = pd.read_csv(os.path.join(tcr_toolbox_data_path, "tcr_toolbox_datasets", "tcr_assembly", "v_gene_assignment_idot_source_plate_layout", "idot_header_template.csv"))
     final_dispense_df = pd.DataFrame()
     tcr_idx = 0
     for target_plate in dispense_df["Target Plate Name"].unique():
@@ -855,3 +850,11 @@ def stream_stderr(pipe: io.IOBase, logfile: str | os.PathLike, is_bytes: bool = 
             logfile.flush()
 
     pipe.close()
+
+
+def ensure_list(x):
+    if isinstance(x, list):
+        return x
+    if isinstance(x, str):
+        return ast.literal_eval(x)
+    return []

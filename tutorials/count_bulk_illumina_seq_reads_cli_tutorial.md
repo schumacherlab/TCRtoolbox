@@ -1,15 +1,22 @@
-# Bulk Illumina TCR beta or alpha chain read counting tutorial
+# Bulk TCR or bulk epi-barcode read counting tutorial
 
 ## 0. Generate reference `.fa` files:
-If you set `generate_illumina_refs = True` in `tcr_toolbox run-tcr-assembly run_assembly_run_config.json` (recommended), then your reference files can be found in the TCR assembly run directory of your library: `/tcr_toolbox_data/tcr_toolbox_tcr_assembly_runs/[your_run]/sequencing_quality_analysis/references/[your_run]_150bp_beta.fa`. If not, use the function `tcr_toolbox.sequencing_analysis.reference.generate_assembly_nt_refs()` in your counts analysis `.ipynb` notebook to generate reference `.fa` files in the `reference` dir of your TCR assembly `run_dir`: 
+If you set `generate_illumina_refs = True` in `tcr_toolbox run-tcr-assembly run_assembly_run_config.json` (recommended), then your reference files can be found in the TCR assembly run directory of your library: `[tcr_toolbox_data_path]/tcr_toolbox_tcr_assembly_runs/[your_run]/sequencing_quality_analysis/references/[your_run]_150bp_beta.fa`. If not, use the function `tcr_toolbox.sequencing_analysis.reference.generate_assembly_nt_refs()` in your counts analysis `.ipynb` notebook to generate reference `.fa` files in the `reference` dir of your TCR assembly `run_dir`: 
 ```python
 from pathlib import Path
 import pandas as pd
+import collections
+import os
+from dotenv import load_dotenv
 
 load_dotenv()
 tcr_toolbox_data_path = os.getenv("tcr_toolbox_data_path")
 
+from tcr_toolbox.sequencing_analysis.reference import generate_assembly_nt_refs
+```
 
+### TCR beta and alpha reference .fa files: 
+```python
 plate_sheet_dir = Path(tcr_toolbox_data_path,
     "/tcr_toolbox_tcr_assembly_runs/[your_run]/plate_sheets"
 )
@@ -21,15 +28,18 @@ tcr_refs_df = pd.concat([tcr_df for tcr_df in tcr_df_dict.values()])
 tcr_refs_df.reset_index(drop=True, inplace=True)
 print(tcr_refs_df.loc[:, "name"].duplicated().any())
 print(tcr_refs_df.loc[:, "name"].isna().any())
+
 Output:
 False
 False
+```
 
+```python
 generate_assembly_nt_refs(
      tcr_refs_df=tcr_refs_df,
      tcr_name_col_name="name",
-     fasta_alpha_out_fname=tcr_toolbox_data_path+'/tcr_toolbox_tcr_assembly_runs/[your_run]/sequencing_quality_analysis/references/r8_alpha.fa',
-     fasta_beta_out_fname=tcr_toolbox_data_path+'/tcr_toolbox_tcr_assembly_runs/[your_run]/sequencing_quality_analysis/references/r8_beta.fa',
+     fasta_alpha_out_fname=tcr_toolbox_data_path+'/tcr_toolbox_tcr_assembly_runs/[your_run]/sequencing_quality_analysis/references/r8_150bp_alpha.fa',
+     fasta_beta_out_fname=tcr_toolbox_data_path+'/tcr_toolbox_tcr_assembly_runs/[your_run]/sequencing_quality_analysis/references/r8_150bp_beta.fa',
      alpha_order_col_name="cdr3j_alpha_nt_order_primers",
      beta_order_col_name="cdr3j_beta_nt_order_primers",
      trim_assembly_primers_from_cdr3j=True,
@@ -61,29 +71,52 @@ generate_assembly_nt_refs(
 
     Finished writing references!
 ```
+### Epi-barcode reference .fa file: 
+```python
+generate_assembly_nt_refs(
+     tcr_refs_df=None,
+     epitope_barcode_refs=Path('/references/epi_twist_p20_oligo_order.fa'), # fasta file used to order epitope-barcode library oligonucleotide pool
+     fasta_epitope_out_fname = '/references/epi_ref.fa',
+     fasta_alpha_out_fname=None,
+     fasta_beta_out_fname=None,
+     read_length = 150,
+     epitope_barcode_length = 18,
+     p12_or_p20 = "p20",
+     gtf=True,
+     verbose=1,
+     trim_constant_seq=True,
+ )
+     Output: 
+     epitope_barcode_refs_df shape: 1200
+
+    Translation of first 5 epitope sequences:
+    ['EPRVPFRQFQMNDQDRKENRLGLSRPLRPLR*', 'EPRVPFRQFQMNDQDRKENRLGLSRPLRPLR*', 'KIFEQKDRLSQSKASNELVERRRTMMEDFRK*', 'KIFEQKDRLSQSKASNELVERRRTMMEDFRK*', 'KIFEQKDRLSQSKASKELVERRRTMMEDFRK*']
+
+    Finished writing references!
+```
 
 ## 1. Initialize Project Directory:
 ```bash
 # Local: 
-mkdir /schumi/cr/EPI_CR_1_6_run_1
-mkdir /schumi/cr/EPI_CR_1_6_run_1/configs
-mkdir /schumi/cr/EPI_CR_1_6_run_1/run_logs
+mkdir /project_dir
+mkdir /project_dir/configs
+mkdir /project_dir/run_logs
 
 # Remote:
-mkdir /[path/to/your/remote/project/dir]
-mkdir /[path/to/your/remote/project/dir]/run_logs
-mkdir /[path/to/your/remote/project/dir]/references
+mkdir /[path/to/your/remote/project_dir]
+mkdir /[path/to/your/remote/project_dir]/run_logs
+mkdir /[path/to/your/remote/project_dir]/references
 ```
 
 These commands will create the following directory structure:
 ```bash
 # Local:
-EPI_CR_1_6_run_1/
+project_dir/
     ├── run_logs/
     └── configs/
 
 # Remote:
-[path/to/your/remote/project/dir]/
+[path/to/your/remote/project_dir]/
     ├── run_logs/
     └── references/
 ```
@@ -100,7 +133,7 @@ We provide configuration templates for four bulk sequencing DNA library preparat
 
 - **Ag/epi minigene bulk sequencing:**  
   - `_p20-minigene_` P20 minigene vector.
-  - `_mscv-minigene_` MSCV minigene vector.x
+  - `_mscv-minigene_` MSCV minigene vector.
   
   *Used for Ag/epi library assembly QC, dropout screens, and PAIR-scan screen Ag baseline.*
 
@@ -125,34 +158,36 @@ We will run `_custom-tcr_` counting on a MacBook Pro: `run_config_count_reads_bu
 ```bash
 # Local:
 rsync -avzP [tcr_toolbox_data_path]/tcr_toolbox_datasets/align_count_run_configs/run_config_count_reads_bulk_150bp_custom-tcr_minimap2.json \
-    /schumi/cr/EPI_CR_1_6_run_1/configs/run_config_count_reads_bulk_150bp_custom-tcr_minimap2.json
+    /project_dir/configs/run_config_count_reads_bulk_150bp_custom-tcr_minimap2.json
 
 # Remote:
 rsync -avzP [tcr_toolbox_data_path]/tcr_toolbox_datasets/align_count_run_configs/run_config_count_reads_bulk_150bp_custom-tcr_minimap2.json \
-    [your_cluster]:/[path/to/your/remote/project/dir]/run_config_count_reads_bulk_150bp_custom-tcr_minimap2.json
+    [your_cluster]:/[path/to/your/remote/project_dir]/run_config_count_reads_bulk_150bp_custom-tcr_minimap2.json
 ```
 
 ## 3. Transfer FASTQ and (if running remote) reference .fa files: 
 ```bash
 # Local
-rsync -avzP [path/to/your/]FASTQ/source/dir /schumi/cr/EPI_CR_1_6_run_1/
+rsync -avzP [path/to/your/]FASTQ/source/dir /project_dir/
 
 # Remote:
-rsync -avzP [path/to/your/]FASTQ/source/dir [your_cluster]:[/path/to/remote/project/dir]/
-rsync -avzP [tcr_toolbox_data_path]/tcr_toolbox_tcr_assembly_runs/[your_run]/sequencing_quality_analysis/references/r8_beta.fa \
-    [your_cluster]:[/path/to/remote/project/dir]/references/
+rsync -avzP [path/to/your/]FASTQ/source/dir [your_cluster]:[/path/to/remote/project_dir]/
+rsync -avzP [tcr_toolbox_data_path]/tcr_toolbox_tcr_assembly_runs/[your_run]/sequencing_quality_analysis/references/r8_150bp_beta.fa \
+    [your_cluster]:[/path/to/remote/project_dir]/references/
 ```
 
 ## 4. Adjust parameters in your config files: 
 In your `run_config_count_reads_bulk_150bp_custom-tcr_minimap2.json` copy adjust: 
-- `project_dir`: to your project dir. In this example, `/schumi/cr/EPI_CR_1_6_run_1`. 
-- `reference_file`: to your reference file. If you set `generate_illumina_refs = True` in `tcr_toolbox run-tcr-assembly run_assembly_run_config.json`, you can find your reference in the TCR assembly run_dir of your library: `[tcr_toolbox_data]/tcr_toolbox_tcr_assembly_runs/[your_run]_tcr_assembly/sequencing_quality_analysis/references/r8_beta.fa`
+- `project_dir`: to your project dir. In this example, `/project_dir`. 
+- `reference_file`: to your reference file. If you set `generate_illumina_refs = True` in `tcr_toolbox run-tcr-assembly run_assembly_run_config.json`, you can find your reference in the TCR assembly run_dir of your library: `[tcr_toolbox_data_path]/tcr_toolbox_tcr_assembly_runs/[your_run]_tcr_assembly/sequencing_quality_analysis/references/r8_150bp_beta.fa`
 - `threads`: the number of cpus you want to use if 1 thread = 1 cpu on your computer. 
+
+**The JSON below is an illustrative example only — do not copy it as-is.** Edit the `project_dir` and `reference_file` values in **your own** copy of the config file to match your setup.
 ```bash
 /configs/run_config_count_reads_bulk_150bp_custom-tcr_minimap2.json
 {
-    "project_dir": "/schumi/cr/EPI_CR_1_6_run_1", 
-    "reference_file": "[tcr_toolbox_data_path]/tcr_toolbox_tcr_assembly_runs/[your_run]/sequencing_quality_analysis/references/r8_beta.fa",
+    "project_dir": "/project_dir", 
+    "reference_file": "[tcr_toolbox_data_path]/tcr_toolbox_tcr_assembly_runs/[your_run]/sequencing_quality_analysis/references/r8_150bp_beta.fa",
     "minimal_overlap": 105,
     "max_mismatches": 0,
     "max_soft_5_end": 0,
@@ -174,8 +209,12 @@ In your `run_config_count_reads_bulk_150bp_custom-tcr_minimap2.json` copy adjust
 On your MacBook in the terminal run:  
 ```bash
 conda activate tcr_toolbox_env
-cd /schumi/cr/EPI_CR_1_6_run_1/run_logs
-tcr_toolbox count-reads-bulk ../configs/run_config_count_reads_bulk_150bp_custom-tcr_minimap2.json > count_reads_bulk.out 2>count_reads_bulk.err
+cd /project_dir/run_logs
+
+tcr_toolbox count-reads-bulk \
+  ../configs/run_config_count_reads_bulk_150bp_custom-tcr_minimap2.json \
+  > count_reads_bulk.out \
+  2> count_reads_bulk.err
 ```
 
 When connected to a remote SLURM cluster first adjust in `run_count_reads_bulk_slurm.sh`:
@@ -183,7 +222,7 @@ When connected to a remote SLURM cluster first adjust in `run_count_reads_bulk_s
 -  `#SBATCH --mem`: to your required amount of memory. In this example: `32GB`. 
 -  `#SBATCH --time`: to your required run time. In this example: 10 hours. 
 ```bash
-cd project_dir
+cd /project_dir
 vi ./run_count_reads_bulk_slurm.sh
 #!/bin/bash
 #SBATCH --partition=cpu
@@ -205,8 +244,8 @@ tcr_toolbox count-reads-bulk $1
 Then run: 
 ```bash
 conda activate py312-tcr-toolbox
-cd [project_dir]
-sbatch run_count_reads_bulk_slurm.sh TCRtoolbox/configs/sequencing_analysis/run_config_count_reads_bulk_150bp_custom-tcr_minimap2.json
+cd /project_dir
+sbatch run_count_reads_bulk_slurm.sh run_config_count_reads_bulk_150bp_custom-tcr_minimap2.json
 ``` 
 
 ## 6. Monitor progress of your active counting run: 
@@ -219,11 +258,13 @@ vi count_reads_bulk.err
 # View tail of log file:
 tail count_reads_bulk.err
 ```
-Familiarize yourself with CIGAR and MD alignment tags to understand how your alignments are filtered: 
+Familiarize yourself with CIGAR and MD alignment tags to understand how your alignments are filtered. 
+Epi alignments (the example below shows a TCR bulk sequencing FASTQ file, not an epi-barcode bulk sequencing FASTQ file) show a 75–78 bp softclip because the epitope reference is trimmed to only 36 bp: the DNA barcode, plus a few epitope-coding bases padded in only if the barcode is shorter than 36 bp. The rest of the read's epitope-coding sequence isn't in the reference, so the aligner soft-clips it. 
 ```bash
 Started cutadapt trimming: CD8_lib_GAATCCA_1.fastq.gz
 Applying 3' quality trimming: 31
 Started minimap2 alignment: CD8_lib_GAATCCA_1_trimmed.fastq.gz
+% primary aligned (CD8_lib_GAATCCA_1_trimmed.fastq.gz): 94.50% (1755660 reads)
 Alignment CD8_lib_GAATCCA_1_trimmed.fastq.gz completed.
 filter_secondary_alignments is set to True, but no secondary alignments detected!
 Top 10 most common cigar strings: [('106M', 1267758), ('105M', 249385), ('102M', 79346), ('107M', 41876), ('103M', 32986), ('104M', 31249), ('101M', 18709), ('99M', 12215), ('98M', 11213), ('100M', 10923)]
@@ -241,8 +282,8 @@ from tcr_toolbox.sequencing_analysis.utils import overlap_between_ref_and_count_
 overlap_between_ref_and_count_names(
         count_file="/counts/CD4_lib_CTCATCT_1_trimmed_sorted_cigarmd_filtered_counts.csv",
         count_file_ref_name_col="reference_name",
-        reference_file="[tcr_toolbox_data]/tcr_toolbox_tcr_assembly_runs/[your_run]/sequencing_quality_analysis/references/r8_150bp_beta.fa",
-        library_ref_id_list=["P108"],
+        reference_file="[tcr_toolbox_data_path]/tcr_toolbox_tcr_assembly_runs/[your_run]/sequencing_quality_analysis/references/r8_150bp_beta.fa",
+        library_ref_id_list=["patient10"],
         print_diff_names=True,
     )
 
@@ -250,6 +291,6 @@ Output:
 "# intersecting: 812"
 "# diff: 5"
 "# union: 819"
-"refs not in count names: {'1_7_I16_207_P108_513', '1_7_J7_222_P108_528', '1_7_G9_152_P108_458', '1_7_J11_226_P108_532', '1_8_C23_70_P108_760'}"
-"count names not in ref subset: {'1_6_A10_9_MAP_CD8-Tpexh-IFNG', '1_6_C7_54_MAP_No-RNA'}"
+"refs not in count names: {'1_7_I16_207_patient10_513', '1_7_J7_222_patient10_528', '1_7_G9_152_patient10_458', '1_7_J11_226_patient10_532', '1_8_C23_70_patient10_760'}"
+"count names not in ref subset: {'1_6_A10_9_patient08_1', '1_6_C7_54_patient08_2'}"
 ```

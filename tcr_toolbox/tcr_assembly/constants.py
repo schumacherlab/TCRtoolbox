@@ -67,6 +67,7 @@ sites_to_check = {
     "pcr_v1_MCSV_mg_fwd_3": "GGACCTGATCAGCAACAACGAGC",
     "seq_CD74_fwd_1": "GACAAGCTGACCGTGACCAGCC",
     "pcr_v1_MCSV_rev_1": "GATCCGACTCGGTGCCACTTTTTCAAC",
+    "p12_Fw5": "CAGTCCTCCGATTGACTGAGTCG",  # used as gDNA p7 Fw
 }
 
 #
@@ -213,7 +214,7 @@ plate_pool_primers_rv = [
 plate_primers_dict = dict(zip(range(0, len(plate_pool_primers_fw)), [[plate_fw, plate_rv] for plate_fw, plate_rv in zip(plate_pool_primers_fw, plate_pool_primers_rv)]))
 
 warnings.warn(
-    "Both plate_pool_primers_fw and plate_pool_primers_rv lists are deprecated (only use these lists for the epitope variant pools!).For TCR assembly, use plate_pool_primers_df instead!",
+    "Both plate_pool_primers_fw and plate_pool_primers_rv lists are deprecated (only use these lists for the epitope variant pools!). For TCR assembly, use plate_pool_primers_df instead!",
     DeprecationWarning,
     stacklevel=2,
 )
@@ -280,3 +281,88 @@ snapgene_feature_dict = {
     "mTRBC": "GAGGACCTGCGGAACGTCACACCTCCAAAAGTGTCCCTCTTCGAGCCAAGCAAAGCAGAGATCGCAAACAAGCAGAAAGCTACACTGGTGTGTCTCGCTAGAGGCTTTTTTCCCGACCATGTGGAGCTGTCCTGGTGGGTGAATGGAAAGGAGGTGCACAGCGGAGTGTGTACCGATCCACAGGCCTACAAGGAGAGCAACTATAGCTACTGTCTGAGCTCCAGACTGCGGGTCAGCGCAACTTTTTGGCACAACCCTCGGAACCATTTTAGATGCCAGGTGCAGTTTCATGGCCTGTCCGAAGAAGATAAGTGGCCAGAGGGAAGCCCAAAGCCAGTCACTCAAAACATCTCCGCCGAAGCTTGGGGAAGGGCCGATTGCGGGATCACAAGCGCTTCCTATCATCAGGGCGTGCTGTCCGCCACAATCCTGTACGAAATCCTGCTCGGCAAAGCTACCCTGTATGCTGTCCTGGTCAGCGGACTCGTGCTGATGGCCATGGTGAAGAAGAAGAACAGCGGCAGCGGAGCCACCAACTTTTCCCTGCTGAAGCAAGCTGGCGACGT",
     "LTR": "AATGAAAGACCCCACCTGTAGGTTTGGCAAGCTAGCTTAAGTAACGCCATTTTGCAAGGCATGGAAAAATACATAACTGAGAATAGAAAAGTTCAGATCAAGGTCAGGAACAGATGGAACAGCTGAATATGGGCCAAACAGGATATCTGTGGTAAGCAGTTCCTGCCCCGGCTCAGGGCCAAGAACAGATGGAACAGCTGAATATGGGCCAAACAGGATATCTGTGGTAAGCAGTTCCTGCCCCGGCTCAGGGCCAAGAACAGATGGTCCCCAGATGCGGTCCAGCCCTCAGCAGTTTCTAGAGAACCATCAGATGTTTCCAGGGTGCCCCAAGGACCTGAAATGACCCTGTGCCTTATTTGAACTAACCAATCAGTTCGCTTCTCGCTTCTGTTCGCGCGCTTCTGCTCCCCGAGCTCAATAAAAGAGCCCACAACCCCTCACTCGGCGCGCCAGTCCTCCGATTGACTGAGTCGCCCGGGTACCCGTGTATCCAATAAACCCTCTTGCAGTTGCATCCGACTTGTGGTCTCGCTGTTCCTTGGGAGGGTCTCCTCTGAGTGATTGACTACCCGTCAGCGGGGGTCTTTCATT",
 }
+
+
+model_tcr_annotation_dict = {
+    "MEL063_44_80": {  # MEL063 name. This TCR is a just reactive HLA-A*02:01 positive control TCR that will not take too many well slots in PAIR-scan.
+        "ag_name": "CCSER2_P329L",
+        "TRAV_IMGT": "TRAV8-6*01",
+        "TRAJ_IMGT": "TRAJ12*01",
+        "cdr3_alpha_aa": "CAVMDSSYKLIF",
+        "TRBV_IMGT": "TRBV12-3*01",
+        "TRBJ_IMGT": "TRBJ2-3*01",
+        "cdr3_beta_aa": "CASSSGPSGDTQYF",
+    },
+    "1G4": {  # Well characterised and low background HLA-A*02:01 positive control TCR.
+        "ag_name": "NY-ESO-1",
+        "TRAV_IMGT": "TRAV21*01",
+        "TRAJ_IMGT": "TRAJ6*01",
+        "cdr3_alpha_aa": "CAVRPTSGGSYIPTF",
+        "TRBV_IMGT": "TRBV6-5*01",
+        "TRBJ_IMGT": "TRBJ2-2*01",
+        "cdr3_beta_aa": "CASSYVGNTGELFF",
+    },
+    "DMF4": {  # Well characterised and low background HLA-A*02:01 positive control TCR. Slightly less reactive than DMF5.
+        "ag_name": "MART1-ELA",
+        "TRAV_IMGT": "TRAV35*01",
+        "TRAJ_IMGT": "TRAJ49*01",
+        "cdr3_alpha_aa": "CAGGTGNQFYF",
+        "TRBV_IMGT": "TRBV10-3*01",
+        "TRBJ_IMGT": "TRBJ1-5*01",
+        "cdr3_beta_aa": "CAISEVGVGQPQHF",
+    },
+    "DMF5": {  # Well characterised and low background HLA-A*02:01 positive control TCR. Slightly more reactive than DMF4.
+        "ag_name": "MART1-ELA",
+        "TRAV_IMGT": "TRAV12-2*01",
+        "TRAJ_IMGT": "TRAJ23*01",
+        "cdr3_alpha_aa": "CAVNFGGGKLIF",
+        "TRBV_IMGT": "TRBV6-4*01",
+        "TRBJ_IMGT": "TRBJ1-1*01",
+        "cdr3_beta_aa": "CASSLSFGTEAFF",
+    },
+    "C7": {  # Low background HLA-A*02:01 positive control TCR (better behaved than e.g., common model TCRs A6, 868 (high background), and CDK4mut #53)
+        "ag_name": "NLV",
+        "TRAV_IMGT": "TRAV24*01",
+        "TRAJ_IMGT": "TRAJ49*01",
+        "cdr3_alpha_aa": "CAFITGNQFYF",
+        "TRBV_IMGT": "TRBV7-2*02",
+        "TRBJ_IMGT": "TRBJ2-5*01",
+        "cdr3_beta_aa": "CASSQTQLWETQYF",
+    },
+    "JM22": {  # Low background HLA-A*02:01 positive control TCR (better behaved than e.g., common model TCRs A6, 868 (high background), and CDK4mut #53)
+        "ag_name": "GIL",
+        "TRAV_IMGT": "TRAV27*01",
+        "TRAJ_IMGT": "TRAJ42*01",
+        "cdr3_alpha_aa": "CAGAGSQGNLIF",
+        "TRBV_IMGT": "TRBV19*01",
+        "TRBJ_IMGT": "TRBJ2-7*01",
+        "cdr3_beta_aa": "CASSSRSSYEQYF",
+    },
+    "r3_1_6_D24_143_YLQPRTFLL": {  # YLQ D2 TCR. Used successfully in the first YLQ full pool epitope variant screen.
+        "ag_name": "YLQ",
+        "TRAV_IMGT": "TRAV12-1*01",
+        "TRAJ_IMGT": "TRAJ11*01",
+        "cdr3_alpha_aa": "CVVNEPLSGYSTLTF",
+        "TRBV_IMGT": "TRBV28*01",
+        "TRBJ_IMGT": "TRBJ2-2*01",
+        "cdr3_beta_aa": "CASSPTGGGNTGELFF",
+    },
+    "r3_1_6_F4_63_YLQPRTFLL": {  # YLQ A10 TCR. High signal over background for both CD69 on Jurkat and CD137 on CD8 T cells from PB.
+        "ag_name": "YLQ",
+        "TRAV_IMGT": "TRAV12-1*01",
+        "TRAJ_IMGT": "TRAJ36*01",
+        "cdr3_alpha_aa": "CVVNKENNLFF",
+        "TRBV_IMGT": "TRBV30*01",
+        "TRBJ_IMGT": "TRBJ2-2*01",
+        "cdr3_beta_aa": "CAWGSMNTGELFF",
+    },
+    "r3_2_15_G16_171_GLCTLVAML": {  # GLC D1 TCR. High siganl over background for CD69 on Jurkats (did not check CD137).
+        "ag_name": "GLC",
+        "TRAV_IMGT": "TRAV5*01",
+        "TRAJ_IMGT": "TRAJ40*01",
+        "cdr3_alpha_aa": "CAEVSGTYKYIF",
+        "TRBV_IMGT": "TRBV20-1*01",
+        "TRBJ_IMGT": "TRBJ1-1*01",
+        "cdr3_beta_aa": "CSAWDREVVGTEAFF",
+    },
+}  # On purpose CDK4mut #53, A6, and 868 are not included because these TCRs give more background in all-vs-all reactivity tests with our Jurkat and MEL063 B cell line.

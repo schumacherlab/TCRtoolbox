@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from scipy.stats import spearmanr
 
 
 def normalize_counts_df_by_total_counts(count_df: pd.DataFrame, count_col: str, normalized_col: str = None):
@@ -135,3 +136,28 @@ def total_count_normalization(count_df: pd.DataFrame, feature_col_list: list = N
     count_df.loc[:, feature_col_list] = count_df.loc[:, feature_col_list].div(cell_count_sums, axis=0).multiply(target_sum, axis=0)
 
     return count_df
+
+
+def normalized_entropy(counts):
+    counts = np.array(counts)
+    if counts.sum() == 0 or len(counts) == 1:
+        return 0
+    p = counts / counts.sum()
+    p = p[p > 0]  # avoid log(0)
+    entropy = -np.sum(p * np.log(p))
+    return entropy / np.log(len(counts))
+
+
+def bootstrap_spearman_ci(x, y, n_boot=10000, ci=(2.5, 97.5), random_state=None):
+    rng = np.random.default_rng(random_state)
+
+    x = np.asarray(x)
+    y = np.asarray(y)
+
+    boot_r = np.empty(n_boot)
+
+    for i in range(n_boot):
+        idx = rng.choice(len(x), len(x), replace=True)
+        boot_r[i] = spearmanr(x[idx], y[idx]).statistic
+
+    return np.percentile(boot_r, ci)

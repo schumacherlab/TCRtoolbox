@@ -13,7 +13,8 @@ from dotenv import load_dotenv
 import pysam
 
 from tcr_toolbox.tcr_assembly.constants import tcr_golden_gate_constant_nt_seq_dict
-from tcr_toolbox.utils.constants import p20_cloning_sites, p20_pMX_trim_seqs
+from tcr_toolbox.utils.constants import p20_pMX_trim_seqs
+from tcr_toolbox.epi_assembly.constants import p20_cloning_sites, p12_cloning_sites
 
 load_dotenv()
 tcr_toolbox_data_path = os.getenv("tcr_toolbox_data_path")
@@ -24,7 +25,7 @@ def get_indices(group):
 
 
 def generate_assembly_nt_refs(
-    tcr_refs_df: pd.DataFrame,
+    tcr_refs_df: Union[pd.DataFrame, None] = None,
     epitope_barcode_refs: Union[pd.DatFrame, str, os.PathLike[str], None] = None,
     tcr_name_col_name: str = "name",
     epitope_name_col_name: str = "name",
@@ -43,6 +44,7 @@ def generate_assembly_nt_refs(
     epitope_order_col_name: str = "epitope_order",
     read_length: int = 150,
     epitope_barcode_length: int = 18,
+    p12_or_p20: str = "p20",
     gtf: bool = True,
     verbose: int = 0,
     trim_constant_seq: bool = True,
@@ -56,8 +58,11 @@ def generate_assembly_nt_refs(
 
     Parameters
     ----------
-    tcr_refs_df : pd.DataFrame
-        DataFrame containing all the TCRs that need to be written to the reference .fa file.
+    tcr_refs_df : Union[pd.DataFrame, None], default=None
+        DataFrame containing all the TCRs that need to be written to the reference .fa file. If None, no TCR
+        alpha/beta reference is written and `fasta_alpha_out_fname`, `fasta_beta_out_fname`, and
+        `fasta_beta_epitope_plate_seq_out_fname` must not be set; only an epitope-only reference (via
+        `epitope_barcode_refs` and `fasta_epitope_out_fname`) is generated.
     epitope_barcode_refs : Union[None, pd.DataFrame, str, os.PathLike[str]], default  = None
         DataFrame or fasta file containing antigen/epitope-encoding-minigene + barcode nucleotide order sequences that need to be written to the \
         reference .fa file
@@ -95,6 +100,8 @@ def generate_assembly_nt_refs(
         Sequencing read length for trimming references.
     epitope_barcode_length : int, default=18
         Epitope barcode length for trimming and alignment purposes.
+    p12_or_p20 : str, default='p20'
+        Cloning vector used for epitope-encoding minigenes. Must be 'p12' or 'p20'.
     gtf : bool, default=True
         Whether to generate corresponding GTF annotation files.
     verbose : int, default=0
@@ -190,9 +197,9 @@ def generate_assembly_nt_refs(
     Removing TRBV + CDR3 beta duplicates...
     Shape before TRBV + CDR3 beta duplicate removal: 983
     Shape after duplicate removal: 850
-    epitope_barcode_refs shape: 2778
+    epitope_barcode_refs_df shape: 2778
 
-    Translation of first 5 epitope minigene sequences:
+    Translation of first 5 epitope sequences:
     ['EPPEVGSDCTTIHYNDMCNSSCMGGMNRRPI*', 'EPPEVGSDCTTIHYNDMCNSSCMGGMNRRPI*', ...]
 
     Translation of first 5 reconstructed alpha chains:
@@ -204,48 +211,63 @@ def generate_assembly_nt_refs(
     'MGCRLLCCAVLCLLGAVPIDTEVTQTPKHLVMGMTNKKSLKCEQHMGHRAMYWYKQKAKKPPELMFVYSYEKLSINESVPSRFSPECPNSSLLNLHLHALQPEDSALYLCASSQTPGQTGSPLHFGNGTRLTVTE', ...]
 
     Finished writing references!
+
+
+    Generate an epitope-only reference .fa file (no TCRs):
+
+    >>> generate_assembly_nt_refs(
+    ...     tcr_refs_df=None,
+    ...     epitope_barcode_refs=epitope_barcode_refs,
+    ...     epitope_name_col_name='name',
+    ...     fasta_epitope_out_fname='references/run_name_150bp_epi.fa',
+    ...     epitope_order_col_name='sequence',
+    ...     epitope_barcode_length=18,
+    ...     gtf=True,
+    ...     verbose=1,
+    ... )
+    epitope_barcode_refs_df shape: 2778
+
+    Translation of first 5 epitope sequences:
+    ['EPPEVGSDCTTIHYNDMCNSSCMGGMNRRPI*', 'EPPEVGSDCTTIHYNDMCNSSCMGGMNRRPI*', ...]
+
+    Finished writing references!
     """
-    tcr_refs_df = tcr_refs_df.copy()
-    if not tcr_refs_df.index.is_unique:
-        print("WARNING: tcr_refs_df index was not resetted! Resetting index...")
-        tcr_refs_df.reset_index(drop=True, inplace=True)
+    if p12_or_p20 not in {"p12", "p20"}:
+        raise ValueError(f"p12_or_p20 must be 'p12' or 'p20' and not {p12_or_p20}")
 
-    if tcr_refs_df.loc[:, alpha_order_col_name].isna().any() or tcr_refs_df.loc[:, beta_order_col_name].isna().any():
-        print("TCRs without CDR3-J order sequences found. Please verify that these are wells that on purpose did not get TCRs assigned.\nRemoving these TCRs!")
-        print("Shape before CDR3-J order sequence NaN removal:", tcr_refs_df.shape[0])
-        if tcr_refs_df.loc[:, alpha_order_col_name].isna().any():
-            tcr_refs_df = tcr_refs_df.loc[~tcr_refs_df.loc[:, alpha_order_col_name].isna(), :]
-        if tcr_refs_df.loc[:, beta_order_col_name].isna().any():
-            tcr_refs_df = tcr_refs_df.loc[~tcr_refs_df.loc[:, beta_order_col_name].isna(), :]
-        print("Shape after CDR3-J order sequence NaN removal:", tcr_refs_df.shape[0])
-    tcr_refs_df = tcr_refs_df.copy()
-    if tcr_refs_df.loc[:, alpha_order_col_name].isna().any() or tcr_refs_df.loc[:, beta_order_col_name].isna().any():
-        print("TCRs without CDR3-J order sequences found. Please verify that these are wells that on purpose did not get TCRs assigned.\nRemoving these TCRs!")
-        print("Shape before CDR3-J order sequence NaN removal:", tcr_refs_df.shape[0])
-        if tcr_refs_df.loc[:, alpha_order_col_name].isna().any():
-            tcr_refs_df = tcr_refs_df.loc[~tcr_refs_df.loc[:, alpha_order_col_name].isna(), :]
-        if tcr_refs_df.loc[:, beta_order_col_name].isna().any():
-            tcr_refs_df = tcr_refs_df.loc[~tcr_refs_df.loc[:, beta_order_col_name].isna(), :]
-        print("Shape after CDR3-J order sequence NaN removal:", tcr_refs_df.shape[0])
-
-    alpha_tcr_refs_df = tcr_refs_df.copy()
-    beta_tcr_refs_df = tcr_refs_df.copy()
+    if tcr_refs_df is None and (fasta_alpha_out_fname or fasta_beta_out_fname or fasta_beta_epitope_plate_seq_out_fname):
+        raise ValueError("fasta_alpha_out_fname, fasta_beta_out_fname, and fasta_beta_epitope_plate_seq_out_fname all require tcr_refs_df to be provided.")
+    if tcr_refs_df is None and epitope_barcode_refs is None:
+        raise ValueError("Either tcr_refs_df or epitope_barcode_refs must be provided.")
 
     if model_epitope_dict is None:
         model_epitope_dict = {}
-    with open(
-        os.path.join(
-            tcr_toolbox_data_path,
-            "tcr_toolbox_datasets",
-            "tcr_assembly",
-            "references",
-            "v_gene_stock_sequences",
-            "cys104_trimmed_v_gene_stock_nt_dict.json",
-        )
-    ) as infile:
-        cys104_trimmed_v_gene_stock_nt_dict = json.load(infile)
 
-    print("tcr_ref_df shape:", tcr_refs_df.shape[0])
+    if tcr_refs_df is not None:
+        tcr_refs_df = tcr_refs_df.copy()
+        if not tcr_refs_df.index.is_unique:
+            print("WARNING: tcr_refs_df index was not resetted! Resetting index...")
+            tcr_refs_df.reset_index(drop=True, inplace=True)
+
+        if tcr_refs_df.loc[:, alpha_order_col_name].isna().any() or tcr_refs_df.loc[:, beta_order_col_name].isna().any():
+            print("TCRs without CDR3-J order sequences found. Please verify that these are wells that on purpose did not get TCRs assigned.\nRemoving these TCRs!")
+            print("Shape before CDR3-J order sequence NaN removal:", tcr_refs_df.shape[0])
+            if tcr_refs_df.loc[:, alpha_order_col_name].isna().any():
+                tcr_refs_df = tcr_refs_df.loc[~tcr_refs_df.loc[:, alpha_order_col_name].isna(), :]
+            if tcr_refs_df.loc[:, beta_order_col_name].isna().any():
+                tcr_refs_df = tcr_refs_df.loc[~tcr_refs_df.loc[:, beta_order_col_name].isna(), :]
+            print("Shape after CDR3-J order sequence NaN removal:", tcr_refs_df.shape[0])
+
+        alpha_tcr_refs_df = tcr_refs_df.copy()
+        beta_tcr_refs_df = tcr_refs_df.copy()
+
+        with open(
+            os.path.join(tcr_toolbox_data_path, "tcr_toolbox_datasets", "tcr_assembly", "references", "v_gene_stock_sequences", "cys104_trimmed_v_gene_stock_nt_dict.json")
+        ) as infile:
+            cys104_trimmed_v_gene_stock_nt_dict = json.load(infile)
+
+        print("tcr_ref_df shape:", tcr_refs_df.shape[0])
+
     if fasta_alpha_out_fname:
         if trim_assembly_primers_from_cdr3j:
             # plate Fw/Rev + Fw/Rev orthoprimers are together 40 bp:
@@ -357,14 +379,21 @@ def generate_assembly_nt_refs(
             print("Shape after duplicate removal:", epitope_barcode_refs_df.shape[0])
 
     print("\n\n")
-    if epitope_barcode_refs_df is not None:
+    if epitope_barcode_refs is not None:
         epitope_nt_ref_list = []
         epitope_nt_dict = collections.defaultdict(str)
 
+        if p12_or_p20 == "p12":
+            end_5_bsmbi_site = p12_cloning_sites["end_5_BsmBI_p12"]
+            end_3_bsmbi_site = p12_cloning_sites["end_3_BsmBI_p12"]
+        elif p12_or_p20 == "p20":
+            end_5_bsmbi_site = p20_cloning_sites["end_5_BsmBI_p20"]
+            end_3_bsmbi_site = p20_cloning_sites["end_3_BsmBI_p20"]
+
         for epitope_idx in epitope_barcode_refs_df.index:
             epitope_nt_dict[epitope_idx] = epitope_barcode_refs_df.loc[epitope_idx, epitope_order_col_name][
-                search(p20_cloning_sites["end_5_BsmBI_p20"], epitope_barcode_refs_df.loc[epitope_idx, epitope_order_col_name]).span()[1] : search(
-                    p20_cloning_sites["end_3_BsmBI_p20"], epitope_barcode_refs_df.loc[epitope_idx, epitope_order_col_name]
+                search(end_5_bsmbi_site, epitope_barcode_refs_df.loc[epitope_idx, epitope_order_col_name]).span()[1] : search(
+                    end_3_bsmbi_site, epitope_barcode_refs_df.loc[epitope_idx, epitope_order_col_name]
                 ).span()[0]
             ]
 
@@ -385,11 +414,11 @@ def generate_assembly_nt_refs(
             else:
                 epitope_nt_ref_list.append(epitope_nt_dict[epitope_idx][-epitope_barcode_length:])
 
-        epitope_names = epitope_barcode_refs[epitope_name_col_name].values.tolist()
+        epitope_names = epitope_barcode_refs_df[epitope_name_col_name].values.tolist()
 
         if verbose == 1:
             print("Translation of first 5 epitope sequences:")
-            print([str(Seq(epitope[:-epitope_barcode_length]).translate()) for epitope in epitope_nt_dict.values()[:5]])
+            print([str(Seq(epitope[:-epitope_barcode_length]).translate()) for epitope in list(epitope_nt_dict.values())[:5]])
             print("\n\n")
 
         if model_epitope_dict:
@@ -436,8 +465,9 @@ def generate_assembly_nt_refs(
         alpha_nt_ref_list = []
 
         # Check whether correct start and end amino acids are in alpha order after trimming the golden gate sites by 9 and -10:
-        if not all([True if Seq(cdr3_seq).translate()[0] == "C" else False for cdr3_seq in alpha_tcr_refs_df[alpha_order_col_name].str[9:-10]]) & all(
-            [True if Seq(cdr3_seq).translate()[-1] == "I" else False for cdr3_seq in alpha_tcr_refs_df[alpha_order_col_name].str[9:-10]]
+        if not (
+            all([True if Seq(cdr3_seq).translate()[0] == "C" else False for cdr3_seq in alpha_tcr_refs_df[alpha_order_col_name].str[9:-10]])
+            and all([True if Seq(cdr3_seq).translate()[-1] == "I" else False for cdr3_seq in alpha_tcr_refs_df[alpha_order_col_name].str[9:-10]])
         ):
             raise Exception("Alpha order column is in wrong format!")
 
@@ -517,8 +547,9 @@ def generate_assembly_nt_refs(
         beta_nt_ref_list = []
 
         # Check whether correct start and end amino acids are in beta order after trimming the golden gate sites by 8 and -9:
-        if not all([True if Seq(cdr3_seq).translate()[0] == "C" else False for cdr3_seq in beta_tcr_refs_df[beta_order_col_name].str[8:-9]]) & all(
-            [True if Seq(cdr3_seq).translate()[-1] == "E" else False for cdr3_seq in beta_tcr_refs_df[beta_order_col_name].str[8:-9]]
+        if not (
+            all([True if Seq(cdr3_seq).translate()[0] == "C" else False for cdr3_seq in beta_tcr_refs_df[beta_order_col_name].str[8:-9]])
+            and all([True if Seq(cdr3_seq).translate()[-1] == "E" else False for cdr3_seq in beta_tcr_refs_df[beta_order_col_name].str[8:-9]])
         ):
             raise Exception("Beta order column is in wrong format!")
 
@@ -617,8 +648,7 @@ def generate_assembly_nt_refs(
             if epitope_barcode_refs is not None:
                 beta_nt_ref_list += epitope_nt_ref_list
                 beta_names += ["epi_" + epitope_name for epitope_name in epitope_names]
-
-            if model_epitope_dict and epitope_barcode_refs is not None:
+            elif model_epitope_dict:
                 beta_nt_ref_list += list(model_epitope_dict.values())
                 beta_names += ["epi_" + epitope_name for epitope_name in list(model_epitope_dict.keys())]
 
@@ -668,7 +698,6 @@ def generate_assembly_nanopore_nt_refs(
     alpha_order_col_name: str = "cdr3j_alpha_nt_order_primers",
     beta_order_col_name: str = "cdr3j_beta_nt_order_primers",
     trim_assembly_primers_from_cdr3j: bool = True,
-    include_mu_constant_beta_and_p2a: bool = False,
     v_alpha_col: str = "TRAV_IMGT_allele_collapsed",
     v_beta_col: str = "TRBV_IMGT_allele_collapsed",
     add_number_of_negatives_by_mutating_full_refs: int = None,
@@ -701,8 +730,6 @@ def generate_assembly_nanopore_nt_refs(
         Column in `tcr_refs_df` containing CDR3-J beta nucleotide sequences.
     trim_assembly_primers_from_cdr3j : bool, default True
         Whether to trim 40 bp assembly orthoprimers from CDR3-J sequences.
-    include_mu_constant_beta_and_p2a : bool, default False
-        If True, appends mu constant beta and P2A sequence between beta and alpha chains.
     v_alpha_col : str, default 'TRAV_IMGT_allele_collapsed'
         Column containing TRAV gene annotations.
     v_beta_col : str, default 'TRBV_IMGT_allele_collapsed'
@@ -757,7 +784,6 @@ def generate_assembly_nanopore_nt_refs(
     ...     alpha_order_col_name="cdr3j_alpha_nt_order_primers",
     ...     beta_order_col_name="cdr3j_beta_nt_order_primers",
     ...     trim_assembly_primers_from_cdr3j=True,
-    ...     include_mu_constant_beta_and_p2a=True,
     ...     v_alpha_col="TRAV_IMGT_allele_collapsed",
     ...     v_beta_col="TRBV_IMGT_allele_collapsed",
     ...     add_number_of_negatives_by_mutating_full_refs=None,
@@ -791,14 +817,7 @@ def generate_assembly_nanopore_nt_refs(
         print("Shape after CDR3-J order sequence NaN removal:", tcr_refs_df.shape[0])
 
     with open(
-        os.path.join(
-            tcr_toolbox_data_path,
-            "tcr_toolbox_datasets",
-            "tcr_assembly",
-            "references",
-            "v_gene_stock_sequences",
-            "cys104_trimmed_v_gene_stock_nt_dict.json",
-        )
+        os.path.join(tcr_toolbox_data_path, "tcr_toolbox_datasets", "tcr_assembly", "references", "v_gene_stock_sequences", "cys104_trimmed_v_gene_stock_nt_dict.json")
     ) as infile:
         cys104_trimmed_v_gene_stock_nt_dict = json.load(infile)
 
@@ -829,8 +848,9 @@ def generate_assembly_nanopore_nt_refs(
     alpha_nt_ref_list = []
     alpha_cys104_pos_list = []
     # Check whether correct start and end amino acids are in alpha order after trimming the golden gate sites by 9 and -10:
-    if not all([True if Seq(cdr3_seq).translate()[0] == "C" else False for cdr3_seq in tcr_refs_df[alpha_order_col_name].str[9:-10]]) & all(
-        [True if Seq(cdr3_seq).translate()[-1] == "I" else False for cdr3_seq in tcr_refs_df[alpha_order_col_name].str[9:-10]]
+    if not (
+        all([True if Seq(cdr3_seq).translate()[0] == "C" else False for cdr3_seq in tcr_refs_df[alpha_order_col_name].str[9:-10]])
+        and all([True if Seq(cdr3_seq).translate()[-1] == "I" else False for cdr3_seq in tcr_refs_df[alpha_order_col_name].str[9:-10]])
     ):
         raise Exception("Alpha order column is in wrong format!")
 
@@ -866,8 +886,9 @@ def generate_assembly_nanopore_nt_refs(
     beta_nt_ref_list = []
     beta_cys104_pos_list = []
     # Check whether correct start and end amino acids are in beta order after trimming the golden gate sites by 8 and -9:
-    if not all([True if Seq(cdr3_seq).translate()[0] == "C" else False for cdr3_seq in tcr_refs_df[beta_order_col_name].str[8:-9]]) & all(
-        [True if Seq(cdr3_seq).translate()[-1] == "E" else False for cdr3_seq in tcr_refs_df[beta_order_col_name].str[8:-9]]
+    if not (
+        all([True if Seq(cdr3_seq).translate()[0] == "C" else False for cdr3_seq in tcr_refs_df[beta_order_col_name].str[8:-9]])
+        and all([True if Seq(cdr3_seq).translate()[-1] == "E" else False for cdr3_seq in tcr_refs_df[beta_order_col_name].str[8:-9]])
     ):
         raise Exception("Beta order column is in wrong format!")
 
@@ -909,10 +930,7 @@ def generate_assembly_nanopore_nt_refs(
 
     tcr_nt_refs_list = []
     for alpha_ref, beta_ref in zip(alpha_nt_ref_list, beta_nt_ref_list):
-        if include_mu_constant_beta_and_p2a:
-            tcr_nt_refs_list.append(beta_ref + tcr_golden_gate_constant_nt_seq_dict["muTRBC_P2A_nt"] + alpha_ref)
-        else:
-            tcr_nt_refs_list.append(beta_ref + alpha_ref)
+        tcr_nt_refs_list.append(beta_ref + tcr_golden_gate_constant_nt_seq_dict["muTRBC_P2A_nt"] + alpha_ref)
 
     if verbose == 1:
         print("Translation of first 5 final TCR references:")
@@ -980,7 +998,7 @@ def generate_assembly_nanopore_nt_refs(
                     tcr_names = np.append(tcr_names, (name + "_cdr3j_n"))
 
     if add_number_of_negatives_by_mutating_v_gene_in_refs:
-        if add_number_of_negatives_by_mutating_cdr3j_in_refs > number_non_negative_tcrs:
+        if add_number_of_negatives_by_mutating_v_gene_in_refs > number_non_negative_tcrs:
             raise Exception("More negative TCR ref sequences cannot be generated than TCR ref sequences by mutating V gene region in TCR refs!")
 
         muTRBC_len = len(tcr_golden_gate_constant_nt_seq_dict["muTRBC_P2A_nt"])

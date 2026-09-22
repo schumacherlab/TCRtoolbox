@@ -109,8 +109,6 @@ AA_TO_ID = {
 
 ID_TO_AA = {v: k for k, v in AA_TO_ID.items()}
 
-p20_cloning_sites = {"end_5_BsmBI_p20": "CGATCGTCTCACAGC", "end_3_BsmBI_p20": "CTGATGAGACGGTAG"}
-
 p20_pMX_trim_seqs = {
     "pcr_pMX_rev_muTCRb": "GGGACACTTTTGGAGGTGTGACGTTCCGCAGGTCCTC",
     "pcr_pMX_rev_muTCRa": "GGGGGTCCTTCAGCTGGTATACGGCGGGCTCGGGGTTCTGGATGT",
@@ -127,6 +125,7 @@ p20_pMX_trim_seqs = {
     "RT_TCRb_1_p20_TGA": "TTTTGGAGGTGTGACGTGCTCAGTCA",
     "RT_TCRb_1_p20_TAA": "TTTTGGAGGTGTGACGTGCTCAGTTA",
     "p20_IL2_SP": "GCTGTTGGTCACCAGGGCCAGGCTCAGGGCGATGCAGCTCAGCAG",  # On purpose partial sequence of p20_IL2_SP. Use in cutadapt with -a and without $ anchor or X internal symbols
+    "p12_CD74": "CTTCATTCTCAGGTTCTCCAGCTGCAGGTTCTGAGATGTCACGGT",
 }
 
 cigar_string_to_pysam_cigar_number = {"M": 0, "I": 1, "D": 2, "N": 3, "S": 4, "H": 5, "P": 6, "=": 7, "X": 8, "B": 9}
